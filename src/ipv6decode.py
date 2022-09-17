@@ -15,13 +15,15 @@ def parse_args():
     from argparse import ArgumentParser
 
     fmt_opt = 'long', 'short'
+    zero    = '\N{GURMUKHI DIGIT ZERO}'
 
     see_also = 'See also: https://blogs.infoblox.com/ipv6-coe/fe80-1-is-a-perfectly-valid-ipv6-default-gateway-address/'
     parser = ArgumentParser(epilog=see_also)
     parser.add_argument('-v', '--verbose',  default=0,          dest='verbosity', action='count',      help='Increase the verbosity level each time you specify it.')
     parser.add_argument('-f', '--format',   default=fmt_opt[0],                   choices=fmt_opt,     help='Address format options.  Default: %(default)r.')
+    parser.add_argument(      '--sort',     default=False,                        action='store_true', help='Sort the input addresses from most-global to most-local.')
     # https://www.compart.com/en/unicode/search?q=zero#characters
-    parser.add_argument(      '--zero',     default='\N{GURMUKHI DIGIT ZERO}',    action='store',      help='Characters to use for 4x zero sequence.  Default: %(default)r (Gurmukhi Digit Zero).')
+    parser.add_argument(      '--zero',     default=zero,                         action='store',      help='Characters to use for 4x zero sequence.  Default: %(default)r (Gurmukhi Digit Zero).')
     parser.add_argument(      '--exploded', default=False,                        action='store_true', help='Map the address blocks to binary bit fields.')
     parser.add_argument(      '--testing',  default=False,                        action='store_true', help='Use canned addresses to show stuff and quit.')
     parser.add_argument(      '--dump',     default=False,                        action='store_true', help='Dump internal allocation table and quit.')
@@ -64,6 +66,9 @@ def parse_args():
             'fe80::3aad:a999:6c93:5b1a',
             'fe80::f03c:92ff:fe41:3428',
         )
+
+    if args.sort:
+        args.addresses = sorted(args.addresses, key=lambda a: ipaddress.IPv6Interface(a).exploded)
 
     return args
 
@@ -237,6 +242,10 @@ ULA:=B('fc00::/7',         'Unique Local Unicast (ULA)',                'RFC4193
     B('2606:4700::/32',    'Cloudflare Net'),
     B('2607:F8B0::/32',    'GOOGLE-IPV6'),
     B('2620:FE::/48',      'PCH Public Resolver (quad9)'),
+    B('2600:6C00::/24',    'Charter Communications (CC04)'),
+    B('2600:6c42:7003:300::/64', 'Charter external'),
+    B('2600:6c42:7600:1194::/64', 'Charter internal'),
+    
 ))
 
 IP4 = IP4.address_block
@@ -307,10 +316,17 @@ if __name__ == '__main__':
                     prefix = ''
                     level += 1
 
-            if address._prefixlen <= 64:
+            if address in ULA:
+                id = address.exploded
+                gid = 'GID: ' + id[ 2:14] + ' (40-bits) ' # Global ID
+                sid = 'SID: ' + id[15:19] + ' (16-bits) ' # Subnet ID
+                print(f'{prefix:{wa}}{"| "*level+gid:.<{w2}}', id[:15]+':/48')
+                print(f'{prefix:{wa}}{"| "*level+sid:.<{w2}}', id[:20]+':/64')
+
+            if True: #address._prefixlen <= 64:
                 # Show the isolated Interface ID.
-                iid = 'IID: ' + host(address) + ' '
-                print(f'{prefix:{wa}}{"| "*level+iid:.<{w2}}', address.network)
+                iid = 'IID: ' + host(address) + ' (64-bits) '
+                print(f'{prefix:{wa}}{"| "*level+iid:.<{w2}}', address.exploded)
 
             if level == 0:
                 print(f'{prefix:43} Address in unknown or unassigned block')
