@@ -8,6 +8,7 @@ import os
 import json
 import ipaddress
 from   collections import namedtuple
+from   mac2mfg     import mac2mfg
 
 install_dir = os.path.dirname(os.path.realpath(__file__))  # Chase through any symbolic link from cgi-bin.
 
@@ -60,7 +61,9 @@ def parse_args():
             'ff01:0:0:0:0:0:0:2',
             'FF05:0:0:0:0:0:1:3', # Site-Local All DHCP Servers, https://www.iana.org/assignments/ipv6-multicast-addresses/ipv6-multicast-addresses.xhtml
 
-            # Linode
+            'fdee:dead:beef::1afe:34ff:fefb:01c3',
+
+            # G Linode
             '2600:3c03::f03c:92ff:fe41:3428/64',
             'fddd:1194:1194:1194::1',
             'fe80::3aad:a999:6c93:5b1a',
@@ -238,13 +241,13 @@ ULA:=B('fc00::/7',         'Unique Local Unicast (ULA)',                'RFC4193
     B('2600:8800::/28',    'Cox Communications (CXA)'),
     B('2600:8802::/33',    'NET6-OC-RES-2600-8802-0000-0000'),
     B('2601::/20',         'COMCAST6NET (CCCS)'),
-    B('2601:240::/26',     'CHICAGO-RPD-V6-2'),
+    B('2601:240::/26',     'CHICAGO-RPD-V6-2 (Fi)'),
     B('2606:4700::/32',    'Cloudflare Net'),
     B('2607:F8B0::/32',    'GOOGLE-IPV6'),
     B('2620:FE::/48',      'PCH Public Resolver (quad9)'),
     B('2600:6C00::/24',    'Charter Communications (CC04)'),
-    B('2600:6c42:7003:300::/64', 'Charter external'),
-    B('2600:6c42:7600:1194::/64', 'Charter internal'),
+    B('2600:6c42:7003:300::/64', 'Tr Charter external'),
+    B('2600:6c42:7600:1194::/64', 'Tr Charter internal'),
     
 ))
 
@@ -417,14 +420,15 @@ if __name__ == '__main__':
             else:
                 with input:
                     site_data = json.load(input)['devices']
-            host_id = '('+site_data.get(mac, 'unknown host') + ')'
+            mfg  = '='.join(mac2mfg(mac))
+            host_id = '('+site_data.get(mac, 'unknown host') + f'; {mfg})'
             eui_64  = address.exploded[20:-4]
             if args.exploded:
                 print(bars(128-23-64, c=' '), f'64-bit: EUI-64> {eui_64} EUI-48 MAC>', mac, host_id)
                 print()
             elif level != 0:
                 level += 1
-                print(f'{prefix:{wa}}{"| "*level+"EUI64 ":.<{w2}}', eui_64)
+                print(f'{prefix:{wa}}{"| "*level+"EUI64: RFC4291 Appendix A ":.<{w2}}', eui_64)
                 print(f'{prefix:{wa}}{"| "*level+"EUI48: Device MAC ":.<{w2}}', mac, host_id)
 
     if args.verbosity > 1 and rfcs:
