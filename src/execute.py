@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # vim: set expandtab softtabstop=4 shiftwidth=4:
+# Copyright (C) 2022 Eric Fahlgren
 
 
 import subprocess as _SP
