@@ -2,28 +2,6 @@
 # vim: set expandtab softtabstop=4 shiftwidth=4:
 #-------------------------------------------------------------------------------
 
-if [ ! -x /usr/bin/resolveip ] ; then
-    # Create a 'resolveip' function that takes an IP version and domain name,
-    # resolves and returns all of the IP addresses for the domain in that
-    # family.  'resolveip' already exists on OpenWrt as an optional package
-    # ('opgk install resolveip'), so we can skip this.
-
-    function resolveip() {
-        # Call with 'resolveip -4 google.com', like the OpenWrt equivalent
-        # 'resolveip ${ipv} ${host}'
-
-        ipv=$1   # -4 or -6
-        host=$2  # fqdn
-
-        # 'dig' returns unrequested CNAMES, which are always FQDNs ending
-        # with '.', so we remove those from the return values.
-        [ $ipv == '-4' ] && rr=A || rr=AAAA
-        dig $host $rr +short | grep -v '\.$'
-    }
-fi
-
-#-------------------------------------------------------------------------------
-
 function build_stats() {
     # Build a closure for a 'stats' command that translates an IP address into
     # its previous counter statistics.
@@ -46,12 +24,12 @@ function build_stats() {
 }
 
 #-------------------------------------------------------------------------------
+# Utility to download files.  On OpenWrt use 'uclient-fetch', assume 'curl'
+# is installed elsewhere.
 
-# Another utility to download files.  On OpenWrt use 'uclient-fetch', assume
-# 'curl' is installed elsewhere.
 [ -x /bin/uclient-fetch ] && alias get='uclient-fetch -q -O -' || alias get='curl -s'
-hosts=$(get "https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-domains.txt")
 
+#-------------------------------------------------------------------------------
 
 for ipv in 4 6 ; do
     build_stats $ipv > ./fn  # Make the stats command that returns stats='packets n bytes m'
@@ -91,12 +69,12 @@ nft flush set inet fw4 doh_ipv${ipv}
 nft add element inet fw4 doh_ipv${ipv} {\\
 EOF
 
-    for host in $hosts ; do
-        echo ${ipv} $host
-        for ip in $(resolveip -${ipv} $host) ; do
-            echo "    $ip$(stats $ip), \\" >> ./v${ipv}.tmp
-        done
+    ips=$(get https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv${ipv}.txt | sed 's/#.*//')
+    for ip in $ips; do
+        echo -n "$ip "
+        echo "    $ip$(stats $ip), \\" >> ./v${ipv}.tmp
     done
+    echo ''
     echo '}' >> ./v${ipv}.tmp
 done
 
