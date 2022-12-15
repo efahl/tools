@@ -1,13 +1,26 @@
 #!/bin/sh
 # vim: set expandtab softtabstop=4 shiftwidth=4:
 #-------------------------------------------------------------------------------
-# Tested on OpenWrt, OPNsense, Windows Cygwin, Windows Git Bash, Ubuntu, Fedora
+# Use 'ping' to calculate average rtt to NTP hosts.  We're operating under
+# the assumption that low round-trip time translates to fewer hops translates
+# to the least jitter translates to best NTP server.  Yeah, not exactly
+# scientific, but probably good enough.
 #
-# https://www.he.net/adm/ntp.html         - San Jose and Fremont, below, as I live in CA.
-# https://tf.nist.gov/tf-cgi/servers.cgi  - Fort Collins with IPv6.
+# Tested on
+#     OpenWrt
+#     OPNsense
+#     Windows Cygwin, Windows Git Bash
+#     Debian, Ubuntu, Fedora
+#
+# Sources of host lists:
+# https://www.he.net/adm/ntp.html  - 'sjc' = San Jose and 'fmt' = Fremont.
+# https://tf.nist.gov/tf-cgi/servers.cgi
 # https://www.cloudflare.com/time/
 # https://developers.google.com/time
-# https://www.pool.ntp.org/zone/us        - 2. is only one with IPv6 support.
+# https://www.pool.ntp.org/zone/us - '2.hosts' are the only ones with IPv6 support.
+#
+# Only hosts supporting IPv6 were included in the list below.
+#-------------------------------------------------------------------------------
 
 HOSTS="
     2.pool.ntp.org
@@ -19,6 +32,7 @@ HOSTS="
     time.cloudflare.com
     time.google.com
 "
+
 n_hosts=$(echo $HOSTS | wc -w)
 est_time=$(($n_hosts * 5))
 echo "Be patient, pinging $n_hosts hosts should take about $est_time seconds..."
@@ -47,4 +61,15 @@ get_averages() {
 }
 
 
-get_averages | sort -n
+data=$(get_averages | sort -n)
+echo "$data"
+
+echo ''
+echo 'Consider setting your ntpd servers on an OpenWrt device:'
+echo 'uci show system.ntp'
+echo 'uci delete system.ntp.server'
+echo "$data" | head -4 | sed 's/.* /uci add_list system.ntp.server=/'
+echo 'uci show system.ntp'
+echo 'uci commit'
+echo '/etc/init.d/sysntpd restart'
+echo "ps www | grep '\\bntp  '"
