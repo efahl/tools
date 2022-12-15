@@ -1,6 +1,7 @@
 #!/bin/sh
 # vim: set expandtab softtabstop=4 shiftwidth=4:
 #-------------------------------------------------------------------------------
+# Tested on OpenWrt, OPNsense, Windows Cygwin, Windows Git Bash, Ubuntu, Fedora
 #
 # https://www.he.net/adm/ntp.html         - San Jose and Fremont, below, as I live in CA.
 # https://tf.nist.gov/tf-cgi/servers.cgi  - Fort Collins with IPv6.
@@ -34,15 +35,12 @@ else
     #     round-trip min/avg/max/std-dev = 10.139/12.944/19.168/3.642 ms - OPNsense/FreeBSD
     #     rtt min/avg/max/mdev = 34.767/36.802/41.440/2.718 ms           - Most Linux
     alias ping='ping -c4 -q'
-    alias scan="awk 'BEGIN {FS=\"/\"}; /round-trip.*max / {print \$4}; /(std-dev|mdev) /  {print \$5}'"
+    alias scan="awk 'BEGIN {FS=\"/\"}; /max = / {print \$4}; /(std-dev|mdev) = /  {print \$5}'"
 fi
 
 get_averages() {
-    # In other words, this won't work on windows.
     local avg
-
     for host in $HOSTS; do
-        #avg=$($ping $host | awk 'BEGIN {FS="/"}; /round-trip.*max / {print $4}; /(std-dev|mdev) /  {print $5}')
         avg=$(ping $host | scan)
         echo "$avg ms - $host"
     done
