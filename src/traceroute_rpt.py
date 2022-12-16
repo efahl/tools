@@ -27,7 +27,7 @@ def parse_args():
 
             See lots of details at:
                 http://www.exit109.com/~jeremy/news/providers/traceroute.html
-            (Search for '!H' if you're specifically looking for host reponse failures.)
+            (Search for '!H' if you're specifically looking for host response failures.)
         '''.replace('            ', ''),
     )
 
@@ -91,6 +91,4 @@ if __name__ == '__main__':
             print(f'{host:{maxw}}  {ip:15}  {rtt:7.3f} ms')
             host, ip = 'same', ''
 
-
 #-------------------------------------------------------------------------------
-
