@@ -27,6 +27,7 @@ HOSTS="
     2.us.pool.ntp.org
     clock.fmt.he.net
     clock.sjc.he.net
+    ntp.he.net
     time-d-wwv.nist.gov
     time-e-wwv.nist.gov
     time.cloudflare.com
@@ -56,20 +57,28 @@ get_averages() {
     local avg
     for host in $HOSTS; do
         avg=$(ping $host | scan)
-        echo "$avg ms - $host"
+        echo "    $avg ms - $host"
     done
 }
 
 
 data=$(get_averages | sort -n)
+echo -e '\033[1A\033[2KHosts by lowest RTT:'
 echo "$data"
 
-echo ''
-echo 'Consider setting your ntpd servers on an OpenWrt device:'
-echo 'uci show system.ntp'
-echo 'uci delete system.ntp.server'
-echo "$data" | head -4 | sed 's/.* /uci add_list system.ntp.server=/'
-echo 'uci show system.ntp'
-echo 'uci commit'
-echo '/etc/init.d/sysntpd restart'
-echo "ps www | grep '\\bntp  '"
+if hash uci 2>/dev/null; then
+    echo ''
+    echo 'Current settings:'
+    uci show system.ntp
+
+    echo ''
+    echo 'Consider setting your ntpd servers on this OpenWrt device by running:'
+    echo ''
+    echo 'uci show system.ntp'
+    echo 'uci delete system.ntp.server'
+    echo "$data" | head -4 | sed 's/.* /uci add_list system.ntp.server=/'
+    echo 'uci show system.ntp'
+    echo 'uci commit'
+    echo '/etc/init.d/sysntpd restart'
+    echo "ps www | grep '\\bntp  '"
+fi
