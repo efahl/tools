@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # vim: set expandtab softtabstop=4 shiftwidth=4:
 #-------------------------------------------------------------------------------
 #--   PyFlaker - wrapper for 'pyflakes' and 'frosted'                         --
@@ -51,23 +51,25 @@ install_dir = os.path.dirname(os.path.realpath(__file__))  # Chase through any s
 def parse_args():
     from argparse import ArgumentParser
 
+    engines = 'frosted', 'flakes'
+
     parser = ArgumentParser()
-    parser.add_argument("-v", "--verbose",    default=0,     action="count",      help="Increase the verbosity level each time you specify it.")
-    parser.add_argument("-p", "--dprint",     default=False, action="store_true", help="Scan for diagnostic print statements not in '__main__'.")
-    parser.add_argument("-q", "--quiet",      default=False, action="store_true", help="Suppress all the 'info' messages.")
-    parser.add_argument("-S", "--summarize",  default=False, action="store_true", help="Summarize the files scanned.")
-    parser.add_argument("-s", "--showall",    default=False, action="store_true", help="Show all messages, including those from suppressed symbols.")
-    parser.add_argument("-f", "--use-flakes", default=False, action="store_true", help="Use 'pyflakes' internally, instead of default 'frosted'.")
+    parser.add_argument("-v", "--verbose",    default=0,     action="count",       help="Increase the verbosity level each time you specify it.")
+    parser.add_argument("-p", "--dprint",     default=False, action="store_true",  help="Scan for diagnostic print statements not in '__main__'.")
+    parser.add_argument("-q", "--quiet",      default=False, action="store_true",  help="Suppress all the 'info' messages.")
+    parser.add_argument("-S", "--summarize",  default=False, action="store_true",  help="Summarize the files scanned.")
+    parser.add_argument("-s", "--showall",    default=False, action="store_true",  help="Show all messages, including those from suppressed symbols.")
+    parser.add_argument("-u", "--use",        default=engines[0], choices=engines, help='Underlying lint engine to use.  Default: %(default)r.')
     args, extra = parser.parse_known_args()  # Peel off our own arguments, leave the rest for pyflakes or frosted.
     sys.argv = sys.argv[:1] + extra
 
     global P, C, M
 
-    if args.use_flakes:
+    if args.use == "flakes":
         try:
             import pyflakes
         except ImportError:
-            print("ERROR: You must 'pip install pyflakes' in order to use the --use-flakes option.", file=sys.stderr)
+            print("ERROR: You must 'pip install pyflakes' in order to use the --use=flakes option.", file=sys.stderr)
             raise SystemExit
         else:
             del pyflakes
@@ -104,14 +106,14 @@ def parse_args():
                 return owner.__name__
         M.Message.name = name()
 
-    else:
+    elif args.use == "frosted":
         try:
             import frosted
         except ImportError:
-            print("ERROR: You must 'pip install frosted' unless you use the --use-flakes option.", file=sys.stderr)
+            print("ERROR: You must 'pip install frosted' in order to use the --use=frosted option.", file=sys.stderr)
             raise SystemExit
         else:
-            if float(frosted.__version__) < 1.5:
+            if frosted.__version__ < "1.5":
                 print(f"WARNING: Your installed version of frosted ({frosted.__version__}) "
                        "is too old to support Python 3.7 or later, talk to Eric about 1.5.", file=sys.stderr)
             del frosted
@@ -463,7 +465,7 @@ def report(self, messageClass, *args, **kwds):
         self.messages.append(message)
         return
 
-    if not cmd.use_flakes:
+    if cmd.use == "frosted":
         # Use of real 'flakes' bypasses these checks because the structure of
         # its message classes is grossly different than those in 'frosted'.
 
