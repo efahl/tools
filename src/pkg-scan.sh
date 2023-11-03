@@ -1,12 +1,15 @@
 #!/bin/sh
+# Copyright (c) 2023 Eric Fahlgren <eric.fahlgren@gmail.com>
+# SPDX-License-Identifier: GPL-2.0
 # vim: set expandtab softtabstop=4 shiftwidth=4:
 #-------------------------------------------------------------------------------
 
-# TODO add arg parsing...
-log_all=true        # Log packages that are dependencies, not just independent ones.
-inc_defaults=true   # Log the default packages, not just the user-installed ones.
-keep=false          # Save intermediate files.
-debug=true          # Print some diagnostics.
+list_all=false
+inc_defaults=false
+keep=false
+verbose=false
+quiet=false
+version_to=''
 
 pkg_json=/tmp/pkg-platform.json
 pkg_defaults=/tmp/pkg-defaults
@@ -15,10 +18,44 @@ pkg_installed=/tmp/pkg-installed
 pkg_user=./installed-packages
 pkg_info=./installed-info
 
+usage() {
+    echo "$0 [OPTION]...
+
+Compile a report of all user-installed packages into '$pkg_user',
+and list anything anomalous in '$pkg_info'.
+
+    -a, --all       Log packages that are dependencies, not just independent ones.
+    -d, --defaults  Log the default packages, not just the user-installed ones.
+    --version-to V  Use 'V' as the current version instead of installed.
+
+    -k, --keep      Save intermediate files.
+    -v, --verbose   Print some diagnostics.
+    -q, --quiet     Do not print any standard output."
+    exit 1
+}
+
+while [ "$1" ]; do
+    case "$1" in
+        -a|--all     ) list_all=true ;;
+        -d|--defaults) inc_defaults=true ;;
+        -k|--keep    ) keep=true ;;
+        -v|--verbose ) verbose=true ;;
+        -q|--quiet   ) quiet=true ;;
+        --version-to)
+            shift
+            version_to="$1"
+        ;;
+        *)
+            usage
+        ;;
+    esac
+    shift
+done
+
 #-------------------------------------------------------------------------------
 
 get_installed() {
-    # List the installed packages, per opkg.
+    # Compile a list of the installed packages, per opkg.
 
     opkg list-installed | awk '{print $1}' > $pkg_installed
 }
@@ -39,8 +76,10 @@ get_defaults() {
             -e 'target=$.release.target' \
             -e 'version=$.release.version')
 
+    version=${1:-$version}  # User can override: SNAPSHOT or 22.03.5
+
     #https://github.com/openwrt/packages/blob/master/utils/auc/src/auc.c#L756
-    if [ "$target" = 'x86/64' -o "$target" = 'x86/generic' ]; then
+    if [ "$target" = 'x86/64' ] || [ "$target" = 'x86/generic' ]; then
         board='generic'
     else
         board=$(echo $board | tr ',' '_')
@@ -53,7 +92,12 @@ get_defaults() {
     fi
     board_data="$url/json/v1/$release/targets/$target/$board.json"
 
-    $debug && echo "Fetching $board_data"
+    if $verbose; then
+        echo "Board-name  $board"
+        echo "Target      $target"
+        echo "Version     $version"
+        echo "Fetching $board_data"
+    fi
     wget -q -O $pkg_json "$board_data"
     {
         echo 'kernel'
@@ -65,10 +109,14 @@ get_defaults() {
 
 
 get_dependencies() {
-    # Using data from opkg status, build a file with lines like:
+    # Using data from opkg status, build a file containing all installed
+    # package dependencies.  Each line appears thus:
+    #
     #     pkg:dep1:dep2:dep3:
-    # such that all dependencies are both prefixed and suffixed with ':',
-    # but the root package is not.
+    #
+    # such that 
+    #     pkg = an installed package, with no prefixing delimiter
+    #     dep = all dependencies are both prefixed and suffixed with ':'
 
     awk -F': ' '
         /^Package:/ {
@@ -80,7 +128,9 @@ get_dependencies() {
         }
         /^Depends:/ {
             dout = $2;
-            gsub(/(\([^\)]*\)|), /, ":", dout);
+            gsub(/ \([^\)]*\)/, "", dout);  # Remove version spec.
+            gsub(/, /, ":", dout);          # Convert separators.
+
             printf "%s:%s:\n", package, dout;
             package = "";
         }
@@ -134,52 +184,55 @@ what_provides() {
     # and see if the package name is aliased.
 
     local pkg="$1"
-    opkg whatprovides $pkg | awk '/^ / {print $1}'
+    opkg whatprovides "$pkg" | awk '/^ / {print $1}'
 }
 
 #-------------------------------------------------------------------------------
 
 rm -f $pkg_user
-get_defaults
+get_defaults "$version_to"
 get_dependencies
 get_installed
 
 examined=0
 while read -r pkg; do
     examined=$((examined + 1))
-    printf '%5d - %-40s\r' "$examined" "$pkg"
+#   ! $quiet && printf '%5d - %-40s\r' "$examined" "$pkg"
     deps=$(what_depends "$pkg")
     suffix=''
     if is_default "$pkg"; then
         if ! $inc_defaults; then
-            $debug && echo "Skipping default package: $pkg"
+            $verbose && echo "Skipping default package: $pkg"
             continue
         fi
         suffix="#default"
     fi
     count=$(echo "$deps" | wc -w)
-    if $log_all || [ "$count" -eq 0 ]; then
+    if $list_all || [ "$count" -eq 0 ]; then
         printf '%s%s\t%s\n' "$pkg" "$suffix" "$deps" | sed 's/\s*$//' >> $pkg_user
     fi
 done < $pkg_installed
 
 wid=$(wc -L < $pkg_defaults)
-echo 'Default package scan results:' > $pkg_info
 while read -r pkg; do
     if ! is_installed "$pkg"; then
         aliased=$(what_provides "$pkg")
         if [ -z "$aliased" ] || ! is_installed "$aliased"; then
             printf 'Warning: %-*s - default package is not present\n' "$wid" "$pkg"
         else
-            $debug && printf 'Package: %-*s - replaced/provided by %s\n' "$wid" "$pkg" "$aliased"
+            $verbose && printf 'Default: %-*s - replaced/provided by %s\n' "$wid" "$pkg" "$aliased"
         fi
     fi
-done < $pkg_defaults | tee -a $pkg_info
-
+done < $pkg_defaults > $pkg_info
+if ! $quiet; then
+    cat $pkg_info
+fi
 
 if $keep; then
-    echo 'Keeping working files:'
-    ls -lh "$pkg_json" "$pkg_defaults" "$pkg_depends" "$pkg_installed"
+    if ! $quiet; then
+        echo 'Keeping working files:'
+        ls -lh "$pkg_json" "$pkg_defaults" "$pkg_depends" "$pkg_installed"
+    fi
 else
     rm $pkg_json
     rm $pkg_defaults
@@ -188,5 +241,4 @@ else
 fi
 
 n_logged=$(wc -l < $pkg_user)
-printf 'Done, logged %d of %d entries in %s\n' "$n_logged" "$examined" "$pkg_user"
-
+! $quiet && printf 'Done, logged %d of %d entries in %s\n' "$n_logged" "$examined" "$pkg_user"
