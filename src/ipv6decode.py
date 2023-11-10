@@ -9,6 +9,7 @@ import json
 import ipaddress
 from   collections import namedtuple
 from   mac2mfg     import mac2mfg
+from   whois       import WhoIs
 
 install_dir = os.path.dirname(os.path.realpath(__file__))  # Chase through any symbolic link from cgi-bin.
 
@@ -27,7 +28,7 @@ def parse_args():
     parser.add_argument(      '--zero',     default=zero,                         action='store',      help='Characters to use for 4x zero sequence.  Default: %(default)r (Gurmukhi Digit Zero).')
     parser.add_argument(      '--exploded', default=False,                        action='store_true', help='Map the address blocks to binary bit fields.')
     parser.add_argument(      '--testing',  default=False,                        action='store_true', help='Use canned addresses to show stuff and quit.')
-    parser.add_argument(      '--dump',     default=False,                        action='store_true', help='Dump internal allocation table and quit.')
+    parser.add_argument(      '--list',     default=False,                        action='store_true', help='List internal allocation table and quit.')
     parser.add_argument(                    default=list(),     dest='addresses', nargs='*',           help='All the IP addresses.')
     args = parser.parse_args()
 
@@ -68,6 +69,9 @@ def parse_args():
             'fddd:1194:1194:1194::1',
             'fe80::3aad:a999:6c93:5b1a',
             'fe80::f03c:92ff:fe41:3428',
+
+            '2a01:4f8:c0c:9e5b::1/64',     # Random Hetzner DE server.
+            '2a03:b0c0:3:d0::1af1:1/128',  # OpenWrt on Digital Ocean.
         )
 
     if args.sort:
@@ -91,6 +95,42 @@ def B(addr, name, *args):
         args     = args + defaults[len(args):]
     return Block(ipaddress.IPv6Network(addr), name, *args)
 
+def in_allocations(address):
+    address = address.lower()
+    for b in allocations:
+        if address == b.address_block.with_prefixlen:
+            return True
+    return False
+
+def add_new_allocation(addr, name, *args):
+    allocations.append(B(addr, name, *args))
+    allocations.sort()
+
+
+def add_org(address):
+    """ Search the RIR's RDAPs for the whois entry on this address and add
+        any information regarding containing subnets.
+    """
+    whois = WhoIs(address)
+    if whois:
+        root_cidr = whois.cidr
+        if not in_allocations(root_cidr):
+            desc = f'{whois.name}: {whois.owner}'
+            if whois.asn:
+                desc += f' (ASN {whois.asn})'
+            add_new_allocation(root_cidr, desc)
+            parent = whois.parent
+            if parent:
+                if not parent.startswith('NET'):
+                    try:
+                        parent = ipaddress.IPv6Interface(parent)
+                    except ipaddress.AddressValueError:
+                        parent = None
+                    else:
+                        parent = parent.with_prefixlen
+                if parent:
+                    add_org(parent)
+
 
 # Add entries to the 'allocations' list in arbitrary order, whatever makes it
 # look nice.  The table is sorted by subnet, so that the order here is of no
@@ -111,9 +151,13 @@ allocations = sorted((
     B('::',                'Unspecified Unicast Address',               'RFC4291',          '2006-02',   '',          True,   False,       False,       False,     True ),
     B('::1',               'Loopback Unicast',                          'RFC4291',          '2006-02',   '',          False,  False,       False,       False,     True ),
 IP4:=B('::ffff:0:0/96',    'IPv4-mapped Unicast',                       'RFC4291',          '2006-02',   '',          False,  False,       False,       False,     True ),
-    B('100::/64',          'Discard-Only Address Block',                'RFC6666',          '2012-06',   '',          True,   True,        True,        False,     False),
-    B('64:ff9b::/96',      'IPv4-IPv6 Translat.',                       'RFC6052',          '2010-10',   '',          True,   True,        True,        True,      False),
-    B('64:ff9b:1::/48',    'IPv4-IPv6 Translat.',                       'RFC8215',          '2017-06',   '',          True,   True,        True,        False,     False),
+    B('0064:ff9b::/96',    'IPv4-IPv6 Translat.',                       'RFC6052',          '2010-10',   '',          True,   True,        True,        True,      False),
+    B('0064:ff9b:1::/48',  'IPv4-IPv6 Translat.',                       'RFC8215',          '2017-06',   '',          True,   True,        True,        False,     False),
+    B('0100::/64',         'Discard-Only Address Block',                'RFC6666',          '2012-06',   '',          True,   True,        True,        False,     False),
+    B('0200::/7',          'DEPRECATED OSI NSAP-mapped prefix set',     'RFC4048 RFC4548',  '',          '2004'),
+
+# But wait!  There's more.
+# https://www.iana.org/assignments/ipv6-address-space/ipv6-address-space.xhtml
 
 ULA:=B('fc00::/7',         'Unique Local Unicast (ULA)',                'RFC4193 RFC8190',  '2005-10',   '',          True,   True,        True,        False,     False),
     B('fc00::/8',          'Invalid ULA (0 at bit-8)'),
@@ -166,10 +210,18 @@ ULA:=B('fc00::/7',         'Unique Local Unicast (ULA)',                'RFC4193
 
     #  Address                                                                               Allocation  Termination                                    Globally   Reserved-by
     #  Block                Name                                         RFC                 Date        Date         Source  Destination  Forwardable  Reachable  Protocol
-    B('2000::/3',          'Global Unicast (GUA)'),
+GUA:=B('2000::/3',         'Global Unicast (GUA)'),
 
     # Authority Assignments (sort of, the IANA ones are reserved)
     # https://www.iana.org/assignments/ipv6-unicast-address-assignments/ipv6-unicast-address-assignments.xhtml
+    # Note the two /12 -> /11 for ARIN and RIPE, NRO reports show the change occurred in 2019:
+    # https://www.nro.net/about/rirs/statistics/
+    #
+    # https://www.nro.net/wp-content/uploads/NRO-Statistics-2019-Q1.pdf  Both /12 2019-03-31
+    # https://www.nro.net/wp-content/uploads/NRO-Statistics-2019Q2.pdf   Ripe /11 2019-06-30
+    # Q3 - no change
+    # https://www.nro.net/wp-content/uploads/NRO-Statistics-2019-Q4.pdf  Both /11 2019-12-31
+
     B('2001:0200::/23',    'APNIC',                                     '',                  '1999-07-01'),
     B('2001:0400::/23',    'ARIN',                                      '',                  '1999-07-01'),
     B('2001:0600::/23',    'RIPE NCC',                                  '',                  '1999-07-01'),
@@ -195,12 +247,12 @@ ULA:=B('fc00::/7',         'Unique Local Unicast (ULA)',                'RFC4193
     B('2001:b000::/20',    'APNIC',                                     '',                  '2006-03-08'),
     B('2003:0000::/18',    'RIPE NCC',                                  '',                  '2005-01-12'),
     B('2400:0000::/12',    'APNIC',                                     '',                  '2006-10-03'),
-    B('2600:0000::/12',    'ARIN',                                      '',                  '2006-10-03'),
+#   B('2600:0000::/11',    'ARIN',                                      '',                  '2006-10-03 see /12 -> /11'),
     B('2610:0000::/23',    'ARIN',                                      '',                  '2005-11-17'),
     B('2620:0000::/23',    'ARIN',                                      '',                  '2006-09-12'),
     B('2630:0000::/12',    'ARIN',                                      '',                  '2019-11-06'),
     B('2800:0000::/12',    'LACNIC',                                    '',                  '2006-10-03'),
-    B('2a00:0000::/12',    'RIPE NCC',                                  '',                  '2006-10-03'),
+#   B('2a00:0000::/11',    'RIPE NCC',                                  '',                  '2006-10-03 see /12 -> /11'),
     B('2a10:0000::/12',    'RIPE NCC',                                  '',                  '2019-06-05'),
     B('2c00:0000::/12',    'AFRINIC',                                   '',                  '2006-10-03'),
 
@@ -231,36 +283,42 @@ ULA:=B('fc00::/7',         'Unique Local Unicast (ULA)',                'RFC4193
     B('2d00:0000::/8',     'IANA Reserved',                             '',                  '1999-07-01'),
     B('2e00:0000::/7',     'IANA Reserved',                             '',                  '1999-07-01'),
     B('3000:0000::/4',     'IANA Reserved',                             '',                  '1999-07-01'),
-    B('3ffe::/16',         'IANA Reserved',                             '',                  '2008-04'),
-    B('5f00::/8',          'IANA Reserved',                             '',                  '2008-04'),
+    B('3ffe::/16',         '6bone Testing Allocation',                  'RFC2471 RFC3701',   '1998-09',  '2006-06',   True,   True,        True,        True,      True ),
+    B('5f00::/16',         '6bone Testing Allocation',                  'RFC2471 RFC3701',   '1996-03',  '1998-09',   True,   True,        True,        True,      True ),
 
     #---------------------------------------------------------------------------
     # Specific allocations that we see frequently enough
-    B('2001:4860::/32',    'Google IPv6'),
-    B('2600:3C00::/28',    'Linode US'),
-    B('2600:8800::/28',    'Cox Communications (CXA)'),
-    B('2600:8802::/33',    'NET6-OC-RES-2600-8802-0000-0000'),
-    B('2601::/20',         'COMCAST6NET (CCCS)'),
-    B('2601:240::/26',     'CHICAGO-RPD-V6-2 (Fi)'),
-    B('2606:4700::/32',    'Cloudflare Net'),
-    B('2607:F8B0::/32',    'GOOGLE-IPV6'),
-    B('2620:FE::/48',      'PCH Public Resolver (quad9)'),
-    B('2600:6C00::/24',    'Charter Communications (CC04)'),
-    B('2600:6c42:7003:300::/64', 'Tr Charter external'),
-    B('2600:6c42:7600:1194::/64', 'Tr Charter internal'),
-    
+    # TODO Make sure 'WhoIs' works as well for each of these, and drop them
+    #      as they're unmaintainable.
+    B('2001:4860::/32',           'Google IPv6 (ASN 15169)'),
+    B('2001:578::/30',            'NETBLK-COXIPV6 (ASN 22773)'),
+    B('2600:3C00::/28',           'Linode US (ASN 63949)'),
+    B('2600:8800::/28',           'Cox Communications (CXA, ASN 22773)'),
+    B('2600:8802::/33',           'NET6-OC-RES-2600-8802-0000-0000 (ASN 22773)'),
+#   B('2601::/20',                'COMCAST6NET (CCCS, ASN 7922)'),
+#   B('2601:240::/26',            'CHICAGO-RPD-V6-2 (Fi, ASN 7922)'),
+#   B('2606:4700::/32',           'Cloudflare Net (ASN 13335)'),
+#   B('2607:F8B0::/32',           'GOOGLE-IPV6 (ASN 15169)'),
+#   B('2620:fe::/48',             'PCH Public Resolver (quad9, ASN 19281)'),
+    B('2600:6C00::/24',           'Charter Communications (CC04)'),
+    B('2600:6c42:7003:300::/64',  'Tr Charter external (ASN 20115)'),
+    B('2600:6c42:7600:1194::/64', 'Tr Charter internal (ASN 20115)'),
+
 ))
 
 IP4 = IP4.address_block
 ULA = ULA.address_block
+GUA = GUA.address_block
 
 #-------------------------------------------------------------------------------
 
 def dump(short_addresses):
     wa = (max(len(str(block.address_block)) for block in allocations) if short_addresses else 39) + 5
 
+    rfcs  = dict()
     stack = []
     for block in allocations:
+        add_rfc(rfcs, block)
         addr = block.address_block
         while stack and not stack[-1].supernet_of(addr):
             stack.pop()
@@ -275,13 +333,42 @@ def dump(short_addresses):
         fill = ' ' if len(stack) > 1 else '.'
         print(f'{range+" ":{fill}<{wa}} {indent}{block.name:{50-2*len(stack)}}  {block.rfc}')
 
+    if args.verbosity > 0:
+        show_rfcs(rfcs)
+
     raise SystemExit
+
+
+def add_rfc(rfcs, block):
+    if block.rfc:
+        for rfc in set(block.rfc.split()):
+            if rfc in rfcs and block.name not in rfcs[rfc]:
+                rfcs[rfc].append(block.name)
+            else:
+                rfcs[rfc] = [block.name]
+
+def show_rfcs(rfcs):
+    if rfcs:
+        print('Reference:')
+        for rfc, ref in sorted(rfcs.items()):
+            print(f'http://www.rfc-editor.org/rfc/{rfc.lower()} - {", ".join(ref)}')
 
 #-------------------------------------------------------------------------------
 
 def host(ipv6):
     """ Extract the host identifier from a full address. """
     return ipv6.exploded[20:][:19]
+
+def subset(label, address, prefix, length):
+    """ Given an address, extract the 'length' bits, starting a 'prefix'
+        and build two strings.  If your prefix or length don't fall on 4-bit
+        boundaries, well, it'll be ugly.
+
+        >>> subset('GID', ip, 8, 40)
+        ('GID: aa:6193:884e (40-bits)', 'fdaa:6193:884e::/48')
+    """
+    id = address.exploded
+    l = f'{label}: xxx'
 
 #-------------------------------------------------------------------------------
 
@@ -290,20 +377,24 @@ if __name__ == '__main__':
 
     short_addresses = args.format == 'short'
 
-    if args.dump:
+    if args.list:
         dump(short_addresses)
 
     wa = (max(len(a) for a in args.addresses) if short_addresses else 39) + 5
-    w2 = max(len(a.name) for a in allocations)
+    w2 = max(len(a.name) for a in allocations) + 6 # 6 is for depth fudging.
 
-    rfcs = set()
+    rfcs = dict()
 
     for address in args.addresses:
         try:
-            address  = ipaddress.IPv6Interface(address)
+            address = ipaddress.IPv6Interface(address)
         except Exception as exc:
             print(f'Invalid IPv6 address: {address!r}.  {exc}')
             continue
+
+        if address in GUA:
+            add_org(address.with_prefixlen)
+            w2 = max(len(a.name) for a in allocations) + 6 # 6 is for depth fudging.
 
         addr   = str(address) if short_addresses else address.exploded.replace('0000', args.zero)
         prefix = f'{addr+" ":.<{wa-1}}'
@@ -312,8 +403,7 @@ if __name__ == '__main__':
             level  = 0
             for block in allocations:
                 if address in block.address_block:
-                    if block.rfc:
-                        rfcs |= set(block.rfc.split())
+                    add_rfc(rfcs, block)
                     name = block.name + (f' [{block.rfc}]' if args.verbosity > 0 and block.rfc else '')
                     print(f'{prefix:{wa}}{"| "*level+name+" ":.<{w2}}', block.address_block)
                     prefix = ''
@@ -361,7 +451,7 @@ if __name__ == '__main__':
 
                 vv = ''
                 ofs = 5*ofs // 4
-                for c1, c2 in zip(v, bin_rep[ofs:]):
+                for c1, c2 in zip(v, bin_rep[ofs:], strict=False):
                     if c2 == '0': c2 = args.zero[0]
                     if c1 == '|':
                         vv += c2
@@ -376,8 +466,7 @@ if __name__ == '__main__':
             pl = 0
             for block in allocations:
                 if address in block.address_block:
-                    if block.rfc:
-                        rfcs |= set(block.rfc.split())
+                    add_rfc(rfcs, block)
                     l = block.address_block.prefixlen - pl
                     print(bars(block.address_block.prefixlen, pl), f'<{l}-bit: '+block.name + (f' [{block.rfc}]' if args.verbosity > 0 and block.rfc else ''), block.address_block)
                     pl = block.address_block.prefixlen
@@ -405,7 +494,7 @@ if __name__ == '__main__':
 
         eui64_mask = 0x00FF_FE00_0000
         if (address._ip & eui64_mask) == eui64_mask:
-            # Extract the MAC, toggle the 
+            # Extract the MAC, toggle the
             hi = (address._ip & 0xFFFF_FF00_0000_0000) >> 40
             hi = hi ^ 0b0000_0010_0000_0000_0000_0000
             lo = (address._ip & 0x0000_0000_00FF_FFFF)
@@ -413,6 +502,14 @@ if __name__ == '__main__':
             mac = ':'.join(f'{i:02x}' for i in nn.to_bytes(6, 'big'))
 
             try:
+                # arp_data.json is a mapping from ether MAC addresses to host
+                # name/description, looks like:
+                # {
+                #     "devices": {
+                #         "00:15:5d:10:a8:2e": "host description",
+                #         ...
+                #     }
+                # }
                 input = open(os.path.join(install_dir, 'arp_data.json'))
             except OSError:
                 # print('Could not find MAC -> hostname mappings')
@@ -431,9 +528,7 @@ if __name__ == '__main__':
                 print(f'{prefix:{wa}}{"| "*level+"EUI64: RFC4291 Appendix A ":.<{w2}}', eui_64)
                 print(f'{prefix:{wa}}{"| "*level+"EUI48: Device MAC ":.<{w2}}', mac, host_id)
 
-    if args.verbosity > 1 and rfcs:
-        print('Reference:')
-        for rfc in sorted(rfcs):
-            print(f'http://www.rfc-editor.org/rfc/{rfc.lower()}')
+    if args.verbosity > 1:
+        show_rfcs(rfcs)
 
 #-------------------------------------------------------------------------------
