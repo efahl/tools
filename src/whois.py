@@ -9,46 +9,7 @@ RDAP databases.
 
 from requests import get
 
-#-------------------------------------------------------------------------------
-
-def parse_args():
-    from argparse import ArgumentParser
-
-    parser = ArgumentParser()
-    parser.add_argument('-v', '--verbose', default=False,  action='store_true',         help='Print a bunch of extra debugging data.')
-    parser.add_argument('-t', '--test',    default=False,  action='store_true',         help='Set an option state.')
-    parser.add_argument(                   default=list(), dest='addresses', nargs='*', help='List IP addresses and subnets.')
-
-    args = parser.parse_args()
-    if args.addresses or args.test:
-        return args
-
-    parser.print_help()
-    raise SystemExit
-
-
-test_addresses = (
-#   '2001:0000:4136:e378:8000:63bf:3fff:fdd2',
-#   '2001:0002::6c:ab:a',
-#   '2001:0004:112::48',
-    '2001:1200::/23',  # LACNIC
-    '2001:4200::/23',  # AFRINIC
-    '2001:4400::/23',  # APNIC
-    '2001:db8:8:4::2:1',
-    '2002:624:624::16',
-    '2002:cb0a:3cdd:1::1',
-    '2600:3c03::f03c:92ff:fe41:3428/64',
-    '2600:8802:4200:59:4c59:11ed:5359:49f6/64',
-    '2600:8802:4200:f:a5f9:9e68:58d7:1d63/64',
-    '2620:4f:8000::112:112:48',
-    '2620:fe::9/48',
-    '2620:fe::fe/48',
-    '2a00:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
-    '2a01:4f8:c0c:9e5b::1/64',
-    '64:ff9b::8.8.8.8',
-    '8.8.8.8',
-    '2a03:b0c0:3:d0::1af1:1',
-)
+args = None
 
 #-------------------------------------------------------------------------------
 
@@ -113,36 +74,29 @@ class WhoIs:
             self.from_handle(address)
         else:
             self.from_ip(address)
+        if args and args.verbose and self._js:
+            import pprint
+            print(f'--- {address=} ---')
+            pprint.pprint(self._js)
+
+    def __str__(self):
+        return f'{self.name}: {self.owner} in {self.cidr}'
 
     def from_handle(self, handle):
-        """ When an address starts with 'NET', then its net information may be
-            fetched from ARIN via their Restful Web Services (RWS) site.
+        js = self._js_from_handle(handle)
+        if js:
+            if args and args.verbose:
+                print(f'--- {handle=} ---')
+                import pprint
+                pprint.pprint(js)
 
-            Example:
-            >>> curl -s http://whois.arin.net/rest/net/NET6-2601-240-1.json | json_pp
-            >>> start  = js['net']['netBlocks']['netBlock']['startAddress']['$']
-            >>> length = js['net']['netBlocks']['netBlock']['cidrLength']['$']
-            >>> ref    = js['net']['rdapRef']['$']
-
-            The 'rdapRef' is a link to the RDAP entry, but is missing the CIDR
-            spec, so we append it.
-
-            Reference:
-            https://www.arin.net/resources/registry/whois/rws/api/
-        """
-
-        url = f'https://whois.arin.net/rest/net/{handle}.json'
-        with get(url) as response:
-            if response.status_code != 200:
-                print(f'ERROR: {response.status_code}')
-                self.error = response.status_code
-                return
-
-            js = response.json()
             ref = js['net']['rdapRef']['$']
             if ref.endswith(':'):
                 ref += '/' + js['net']['netBlocks']['netBlock']['cidrLength']['$']
             self.from_ref(ref)
+            if handle == self.parent:
+                # Happens for Linode: 2600:3c03::f03c:92ff:fe41:3428/64
+                self.parent = js['net']['parentNetRef']['@handle']
 
     def from_ip(self, ip_or_subnet):
         """ Use the provided ip to search the various RDAP entries. """
@@ -164,10 +118,10 @@ class WhoIs:
     def extract(self, js):
         self._js      = js
         self.owner    = self._org()
-        self.handle   = self._js.get('handle',  'unknown')
+        self.handle   = self._js.get('handle',  'no-handle')
         self.cidr     = self._cidr()
-        self.name     = self._js.get('name',    'unknown')
-        self.country  = self._js.get('country', 'unknown')
+        self.name     = self._js.get('name',    'no-name')
+        self.country  = self._js.get('country', 'no-country')
         self.asn      = self._asn()
         self.parent   = self._parent()
 
@@ -175,14 +129,39 @@ class WhoIs:
         return self._js is not None
     __hash__ = None
 
+    def _js_from_handle(self, handle):
+        """ When an address starts with 'NET', then its net information may be
+            fetched from ARIN via their Restful Web Services (RWS) site.
+
+            Example:
+            >>> curl -s http://whois.arin.net/rest/net/NET6-2601-240-1.json | json_pp
+            >>> start  = js['net']['netBlocks']['netBlock']['startAddress']['$']
+            >>> length = js['net']['netBlocks']['netBlock']['cidrLength']['$']
+            >>> ref    = js['net']['rdapRef']['$']
+
+            The 'rdapRef' is a link to the RDAP entry, but is missing the CIDR
+            spec, so we append it.
+
+            Reference:
+            https://www.arin.net/resources/registry/whois/rws/api/
+        """
+
+        url = f'https://whois.arin.net/rest/net/{handle}.json'
+        with get(url) as response:
+            if response.status_code == 200:
+                return response.json()
+
+        self.error = response.status_code
+        return None
+
     def _org(self):
         """ Search each entity for one with 'kind=org', then return its 'fn' name. """
         entities = self._js.get('entities')
         if entities is None:
-            return 'unknown organization'
+            return 'no-organization'
 
         found = False
-        organization = 'unknown'
+        organization = 'no-organization'
         for entity in entities:
             handle = entity['handle']
             for item in entity['vcardArray'][1]:
@@ -198,7 +177,11 @@ class WhoIs:
     def _cidr(self):
         cidr_block = self._js.get('cidr0_cidrs')
         if cidr_block is None:
-            return 'unknown CIDR'
+            h = self._js.get('handle')
+            if h and h.startswith('2'):
+                # Total hack for LACNIC missing cidr block.
+                return h
+            return 'no-CIDR'
         cidr_block = cidr_block[0]
         prefix = 'v4prefix' if 'v4prefix' in cidr_block else 'v6prefix'
         return f'{cidr_block[prefix]}/{cidr_block["length"]}'
@@ -207,7 +190,10 @@ class WhoIs:
     def _asn(self):
         for key in self._js:
             if 'aut' in key and self._js[key]:
-                return self._js[key][0]
+                asn = self._js[key]
+                if isinstance(asn, int):
+                    return str(asn)
+                return asn[0]
         return None
 
     def _parent(self):
@@ -218,20 +204,156 @@ class WhoIs:
 
 #-------------------------------------------------------------------------------
 
+class WhoIsCache:
+    # TODO make WhoIsCache a singleton
+    def __init__(self, file=None):
+        self.cache = dict()
+
+        if file is not None:
+            self.file = file
+        else:
+            from sys import platform
+            _is_windows = platform.startswith('win')
+            del platform
+
+        self.file = 'c:/temp/whois.db' if _is_windows else '/tmp/whois.db'
+        self.read()
+
+    def __iter__(self):
+        return iter(self.cache)
+
+    def items(self):
+        return self.cache.items()
+
+    def _canonical_key(self, key):
+        """ Hacky way to canonicalize GUAs. """
+        if key.startswith('2'):
+            key = key.lower()
+        return key
+
+    def add(self, key, whois):
+        if whois:
+            key = self._canonical_key(key)
+            self.cache[key] = whois
+
+    def get(self, key):
+        key = self._canonical_key(key)
+        return self.cache.get(key, None)
+
+    def read(self):
+        try:
+            f = open(self.file, 'rb')
+        except IOError as exc:
+            print(exc)
+            pass
+        else:
+            with f:
+                from pickle import load
+                self.cache = load(f)
+
+    def write(self):
+        try:
+            f = open(self.file, 'wb')
+        except IOError as exc:
+            print(exc)
+            pass
+        else:
+            with f:
+                from pickle import dump
+                dump(self.cache, f)
+
+    def flush(self):
+        self.cache = dict()
+        self.write()
+
+#-------------------------------------------------------------------------------
+
+_cache = None
+
+def _load_cache():
+    global _cache
+    if _cache is None:
+        _cache = WhoIsCache()  # TODO make WhoIsCache a singleton
+
+def whois_from_cache(address, reload=False):
+    _load_cache()
+
+    if address == '::/0':
+        # Ignore null.
+        return
+
+    whois = _cache.get(address)
+    if not whois or reload:
+        print(f'Updating cache {address}...')
+        whois = WhoIs(address)
+        _cache.add(address, whois)
+        _cache.write()
+    return whois
+
+#-------------------------------------------------------------------------------
+
 if __name__ == '__main__':
+    test_addresses = (
+    #   '2001:0000:4136:e378:8000:63bf:3fff:fdd2',
+    #   '2001:0002::6c:ab:a',
+    #   '2001:0004:112::48',
+        '2001:1200::/23',  # LACNIC
+        '2001:4200::/23',  # AFRINIC
+        '2001:4400::/23',  # APNIC
+        '2001:db8:8:4::2:1',
+        '2002:624:624::16',
+        '2002:cb0a:3cdd:1::1',
+        '2600:3c03::f03c:92ff:fe41:3428/64',
+        '2600:8802:4200:59:4c59:11ed:5359:49f6/64',
+        '2600:8802:4200:f:a5f9:9e68:58d7:1d63/64',
+        '2620:4f:8000::112:112:48',
+        '2620:fe::9/48',
+        '2620:fe::fe/48',
+        '2a00:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+        '2a01:4f8:c0c:9e5b::1/64',
+        '64:ff9b::8.8.8.8',
+        '8.8.8.8',
+        '2a03:b0c0:3:d0::1af1:1',
+        'NET6-2600-3C00-1',
+        'NET6-2001-C00-1',
+    )
+
+    def parse_args():
+        from argparse import ArgumentParser
+
+        parser = ArgumentParser()
+        parser.add_argument('-v', '--verbose', default=False,  action='store_true',         help='Print a bunch of extra debugging data.')
+        parser.add_argument('-r', '--reload',  default=False,  action='store_true',         help='Reload the cache using a fresh lookup.')
+        parser.add_argument('-d', '--dump',    default=False,  action='store_true',         help='Dump the cache and quit.')
+        parser.add_argument('-t', '--test',    default=False,  action='store_true',         help='Set an option state.')
+        parser.add_argument(                   default=list(), dest='addresses', nargs='*', help='List IP addresses, subnets and handles.')
+
+        args = parser.parse_args()
+        if args.addresses or args.test or args.dump:
+            return args
+
+        parser.print_help()
+        raise SystemExit
+
     args = parse_args()
+
+    if args.dump:
+        _load_cache()
+        key_len = max(len(k) for k in _cache)
+        for key in sorted(_cache):
+            whois = whois_from_cache(key, args.reload)
+            print(f'{key:<{key_len}} - {whois}')
+        raise SystemExit
+
     if args.test:
         args.addresses = test_addresses
 
     for ip in args.addresses:
-        print(f'IP {ip} results:')
-        whois = WhoIs(ip)
+        print(f'Results for {ip!r}:')
+        whois = whois_from_cache(ip, args.reload)
         if not whois:
             print(f'        Error: {whois.error}')
         else:
-            if args.verbose:
-                import pprint
-                print(pprint.pprint(whois._js))
             print('        Query:  ', whois.url)
             print('        Owner:  ', whois.owner)
             print('        Handle: ', whois.handle)

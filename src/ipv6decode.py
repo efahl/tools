@@ -9,7 +9,7 @@ import json
 import ipaddress
 from   collections import namedtuple
 from   mac2mfg     import mac2mfg
-from   whois       import WhoIs
+from   whois       import whois_from_cache, WhoIs
 
 install_dir = os.path.dirname(os.path.realpath(__file__))  # Chase through any symbolic link from cgi-bin.
 
@@ -72,6 +72,7 @@ def parse_args():
 
             '2a01:4f8:c0c:9e5b::1/64',     # Random Hetzner DE server.
             '2a03:b0c0:3:d0::1af1:1/128',  # OpenWrt on Digital Ocean.
+            '2804:49c:3102:401:ffff:ffff:ffff:36', # Some random Brazilian/LACNIC site.
         )
 
     if args.sort:
@@ -99,8 +100,8 @@ def in_allocations(address):
     address = address.lower()
     for b in allocations:
         if address == b.address_block.with_prefixlen:
-            return True
-    return False
+            return b
+    return None
 
 def add_new_allocation(addr, name, *args):
     allocations.append(B(addr, name, *args))
@@ -111,25 +112,32 @@ def add_org(address):
     """ Search the RIR's RDAPs for the whois entry on this address and add
         any information regarding containing subnets.
     """
-    whois = WhoIs(address)
+    debug = False
+    if debug: print('lookup', address)
+    whois = whois_from_cache(address)
     if whois:
         root_cidr = whois.cidr
-        if not in_allocations(root_cidr):
+        if block := in_allocations(root_cidr):
+            if debug:
+                print('  already there', block)
+        else:
             desc = f'{whois.name}: {whois.owner}'
             if whois.asn:
                 desc += f' (ASN {whois.asn})'
             add_new_allocation(root_cidr, desc)
-            parent = whois.parent
+
+        parent = whois.parent
+        if debug: print('   parent', parent)
+        if parent:
+            if not parent.startswith('NET'):
+                try:
+                    parent = ipaddress.IPv6Interface(parent)
+                except ipaddress.AddressValueError:
+                    parent = None
+                else:
+                    parent = parent.with_prefixlen
             if parent:
-                if not parent.startswith('NET'):
-                    try:
-                        parent = ipaddress.IPv6Interface(parent)
-                    except ipaddress.AddressValueError:
-                        parent = None
-                    else:
-                        parent = parent.with_prefixlen
-                if parent:
-                    add_org(parent)
+                add_org(parent)
 
 
 # Add entries to the 'allocations' list in arbitrary order, whatever makes it
@@ -222,39 +230,39 @@ GUA:=B('2000::/3',         'Global Unicast (GUA)'),
     # Q3 - no change
     # https://www.nro.net/wp-content/uploads/NRO-Statistics-2019-Q4.pdf  Both /11 2019-12-31
 
-    B('2001:0200::/23',    'APNIC',                                     '',                  '1999-07-01'),
-    B('2001:0400::/23',    'ARIN',                                      '',                  '1999-07-01'),
-    B('2001:0600::/23',    'RIPE NCC',                                  '',                  '1999-07-01'),
-    B('2001:0800::/22',    'RIPE NCC',                                  '',                  '2002-11-02'),
-    B('2001:0c00::/23',    'APNIC',                                     '',                  '2002-05-02'),
-    B('2001:0e00::/23',    'APNIC',                                     '',                  '2003-01-01'),
-    B('2001:1200::/23',    'LACNIC',                                    '',                  '2002-11-01'),
-    B('2001:1400::/22',    'RIPE NCC',                                  '',                  '2003-07-01'),
-    B('2001:1800::/23',    'ARIN',                                      '',                  '2003-04-01'),
-    B('2001:1a00::/23',    'RIPE NCC',                                  '',                  '2004-01-01'),
-    B('2001:1c00::/22',    'RIPE NCC',                                  '',                  '2004-05-04'),
-    B('2001:2000::/19',    'RIPE NCC',                                  '',                  '2019-03-12'),
-    B('2001:4000::/23',    'RIPE NCC',                                  '',                  '2004-06-11'),
-    B('2001:4200::/23',    'AFRINIC',                                   '',                  '2004-06-01'),
-    B('2001:4400::/23',    'APNIC',                                     '',                  '2004-06-11'),
-    B('2001:4600::/23',    'RIPE NCC',                                  '',                  '2004-08-17'),
-    B('2001:4800::/23',    'ARIN',                                      '',                  '2004-08-24'),
-    B('2001:4a00::/23',    'RIPE NCC',                                  '',                  '2004-10-15'),
-    B('2001:4c00::/23',    'RIPE NCC',                                  '',                  '2004-12-17'),
-    B('2001:5000::/20',    'RIPE NCC',                                  '',                  '2004-09-10'),
-    B('2001:8000::/19',    'APNIC',                                     '',                  '2004-11-30'),
-    B('2001:a000::/20',    'APNIC',                                     '',                  '2004-11-30'),
-    B('2001:b000::/20',    'APNIC',                                     '',                  '2006-03-08'),
-    B('2003:0000::/18',    'RIPE NCC',                                  '',                  '2005-01-12'),
-    B('2400:0000::/12',    'APNIC',                                     '',                  '2006-10-03'),
+#   B('2001:0200::/23',    'APNIC',                                     '',                  '1999-07-01'),
+#   B('2001:0400::/23',    'ARIN',                                      '',                  '1999-07-01'),
+#   B('2001:0600::/23',    'RIPE NCC',                                  '',                  '1999-07-01'),
+#   B('2001:0800::/22',    'RIPE NCC',                                  '',                  '2002-11-02'),
+#   B('2001:0c00::/23',    'APNIC',                                     '',                  '2002-05-02'),
+#   B('2001:0e00::/23',    'APNIC',                                     '',                  '2003-01-01'),
+#   B('2001:1200::/23',    'LACNIC',                                    '',                  '2002-11-01'),
+#   B('2001:1400::/22',    'RIPE NCC',                                  '',                  '2003-07-01'),
+#   B('2001:1800::/23',    'ARIN',                                      '',                  '2003-04-01'),
+#   B('2001:1a00::/23',    'RIPE NCC',                                  '',                  '2004-01-01'),
+#   B('2001:1c00::/22',    'RIPE NCC',                                  '',                  '2004-05-04'),
+#   B('2001:2000::/19',    'RIPE NCC',                                  '',                  '2019-03-12'),
+#   B('2001:4000::/23',    'RIPE NCC',                                  '',                  '2004-06-11'),
+#   B('2001:4200::/23',    'AFRINIC',                                   '',                  '2004-06-01'),
+#   B('2001:4400::/23',    'APNIC',                                     '',                  '2004-06-11'),
+#   B('2001:4600::/23',    'RIPE NCC',                                  '',                  '2004-08-17'),
+#   B('2001:4800::/23',    'ARIN',                                      '',                  '2004-08-24'),
+#   B('2001:4a00::/23',    'RIPE NCC',                                  '',                  '2004-10-15'),
+#   B('2001:4c00::/23',    'RIPE NCC',                                  '',                  '2004-12-17'),
+#   B('2001:5000::/20',    'RIPE NCC',                                  '',                  '2004-09-10'),
+#   B('2001:8000::/19',    'APNIC',                                     '',                  '2004-11-30'),
+#   B('2001:a000::/20',    'APNIC',                                     '',                  '2004-11-30'),
+#   B('2001:b000::/20',    'APNIC',                                     '',                  '2006-03-08'),
+#   B('2003:0000::/18',    'RIPE NCC',                                  '',                  '2005-01-12'),
+#   B('2400:0000::/12',    'APNIC',                                     '',                  '2006-10-03'),
 #   B('2600:0000::/11',    'ARIN',                                      '',                  '2006-10-03 see /12 -> /11'),
-    B('2610:0000::/23',    'ARIN',                                      '',                  '2005-11-17'),
-    B('2620:0000::/23',    'ARIN',                                      '',                  '2006-09-12'),
-    B('2630:0000::/12',    'ARIN',                                      '',                  '2019-11-06'),
+#   B('2610:0000::/23',    'ARIN',                                      '',                  '2005-11-17'),
+#   B('2620:0000::/23',    'ARIN',                                      '',                  '2006-09-12'),
+#   B('2630:0000::/12',    'ARIN',                                      '',                  '2019-11-06'),
     B('2800:0000::/12',    'LACNIC',                                    '',                  '2006-10-03'),
 #   B('2a00:0000::/11',    'RIPE NCC',                                  '',                  '2006-10-03 see /12 -> /11'),
-    B('2a10:0000::/12',    'RIPE NCC',                                  '',                  '2019-06-05'),
-    B('2c00:0000::/12',    'AFRINIC',                                   '',                  '2006-10-03'),
+#   B('2a10:0000::/12',    'RIPE NCC',                                  '',                  '2019-06-05'),
+#   B('2c00:0000::/12',    'AFRINIC',                                   '',                  '2006-10-03'),
 
     #  Address                                                                               Allocation  Termination                                    Globally   Reserved-by
     #  Block                Name                                         RFC                 Date        Date         Source  Destination  Forwardable  Reachable  Protocol
@@ -291,10 +299,10 @@ GUA:=B('2000::/3',         'Global Unicast (GUA)'),
     # TODO Make sure 'WhoIs' works as well for each of these, and drop them
     #      as they're unmaintainable.
     B('2001:4860::/32',           'Google IPv6 (ASN 15169)'),
-    B('2001:578::/30',            'NETBLK-COXIPV6 (ASN 22773)'),
-    B('2600:3C00::/28',           'Linode US (ASN 63949)'),
-    B('2600:8800::/28',           'Cox Communications (CXA, ASN 22773)'),
-    B('2600:8802::/33',           'NET6-OC-RES-2600-8802-0000-0000 (ASN 22773)'),
+#   B('2001:578::/30',            'NETBLK-COXIPV6 (ASN 22773)'),
+#   B('2600:3C00::/28',           'Linode US (ASN 63949)'),
+#   B('2600:8800::/28',           'Cox Communications (CXA, ASN 22773)'),
+#   B('2600:8802::/33',           'NET6-OC-RES-2600-8802-0000-0000 (ASN 22773)'),
 #   B('2601::/20',                'COMCAST6NET (CCCS, ASN 7922)'),
 #   B('2601:240::/26',            'CHICAGO-RPD-V6-2 (Fi, ASN 7922)'),
 #   B('2606:4700::/32',           'Cloudflare Net (ASN 13335)'),
@@ -381,7 +389,7 @@ if __name__ == '__main__':
         dump(short_addresses)
 
     wa = (max(len(a) for a in args.addresses) if short_addresses else 39) + 5
-    w2 = max(len(a.name) for a in allocations) + 6 # 6 is for depth fudging.
+    w2 = max(len(a.name) for a in allocations) + 8 # 8 is for depth fudging.
 
     rfcs = dict()
 
@@ -394,7 +402,7 @@ if __name__ == '__main__':
 
         if address in GUA:
             add_org(address.with_prefixlen)
-            w2 = max(len(a.name) for a in allocations) + 6 # 6 is for depth fudging.
+            w2 = max(len(a.name) for a in allocations) + 8 # 8 is for depth fudging.
 
         addr   = str(address) if short_addresses else address.exploded.replace('0000', args.zero)
         prefix = f'{addr+" ":.<{wa-1}}'
