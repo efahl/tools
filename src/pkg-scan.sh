@@ -2,16 +2,27 @@
 # Copyright (c) 2023 Eric Fahlgren <eric.fahlgren@gmail.com>
 # SPDX-License-Identifier: GPL-2.0
 # vim: set expandtab softtabstop=4 shiftwidth=4:
+# shellcheck disable=SC2039  # "local" not defined in POSIX sh
 #-------------------------------------------------------------------------------
 
+# User options, see 'usage'.
 list_all=false
+list_pkgs=false
 inc_defaults=false
+inc_missing=false
+check_failed=false
 keep=false
 verbose=false
 quiet=false
 version_to=''
 
+# Global variables
+version=''        # "SNAPSHOT" or "22.03.1"
+package_arch=''   # "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53"
+
+# Files used.
 pkg_json=/tmp/pkg-platform.json
+pkg_fail=/tmp/pkg-failures.html
 pkg_defaults=/tmp/pkg-defaults
 pkg_depends=/tmp/pkg-depends
 pkg_installed=/tmp/pkg-installed
@@ -24,13 +35,20 @@ usage() {
 Compile a report of all user-installed packages into '$pkg_user',
 and list anything anomalous in '$pkg_info'.
 
+  Package processing:
     -a, --all       Log packages that are dependencies, not just independent ones.
-    -d, --defaults  Log the default packages, not just the user-installed ones.
+    -d, --defaults  Log the installed default packages, not just the user-installed ones.
+    -m, --missing   Log the missing default packages along with user-installed.
     --version-to V  Use 'V' as the current version instead of installed.
+    -f, --failed    Check for failed package builds on intended version.
 
-    -k, --keep      Save intermediate files.
-    -v, --verbose   Print some diagnostics.
-    -q, --quiet     Do not print any standard output."
+  Output:
+    -k, --keep      Save and ls intermediate files.
+    -l, --list      Display package list on a single line, appropriate for builder.
+    -v, --verbose   Print various diagnostics.
+    -q, --quiet     Do not print any standard output.
+
+    -x              Enable all of -d -m -k -l -f -v"
     exit 1
 }
 
@@ -38,9 +56,20 @@ while [ "$1" ]; do
     case "$1" in
         -a|--all     ) list_all=true ;;
         -d|--defaults) inc_defaults=true ;;
+        -m|--missing ) inc_missing=true ;;
         -k|--keep    ) keep=true ;;
         -v|--verbose ) verbose=true ;;
         -q|--quiet   ) quiet=true ;;
+        -l|--list    ) list_pkgs=true ;;
+        -f|--failed  ) check_failed=true ;;
+        -x           )
+            inc_defaults=true
+            inc_missing=true
+            keep=true
+            list_pkgs=true
+            check_failed=true
+            verbose=true
+        ;;
         --version-to)
             shift
             version_to="$1"
@@ -68,15 +97,26 @@ get_defaults() {
     # This might fail miserably for SNAPHOT boxes that are well out of date,
     # as the contents of snaphot builds is neither versioned nor maintained
     # for any long period.  Packages may come or go, or be renamed...
+    #
+    # Globals defined here:
+    #     version      - "SNAPSHOT" or "22.03.1"
+    #     package_arch - "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53"
 
-    local url board target version board_data release
+    local url          # sysupgrade server base url
+    local board_data   # synthesized url of board json
+    local board        # "generic" (for x86) or "tplink,archer-c7-v4" or "linksys,e8450-ubi"
+    local target       # "ath79/generic" or "mediatek/mt7622" or "x86/64"
+    local release      # "snapshots" or "release/23.05.0"
+    local fstype       # "ext4" or "squashfs"
+
     url=$(uci get attendedsysupgrade.server.url)
-    eval $(ubus call system board | jsonfilter \
+    eval "$(ubus call system board | jsonfilter \
             -e 'board=$.board_name' \
             -e 'target=$.release.target' \
-            -e 'version=$.release.version')
+            -e 'version=$.release.version' \
+            -e 'fstype=$.rootfs_type')"
 
-    version=${1:-$version}  # User can override: SNAPSHOT or 22.03.5
+    version=${1:-$version}  # User can override: SNAPSHOT or 22.03.5.  NOTE: Resets global!
 
     #https://github.com/openwrt/packages/blob/master/utils/auc/src/auc.c#L756
     if [ "$target" = 'x86/64' ] || [ "$target" = 'x86/generic' ]; then
@@ -93,18 +133,32 @@ get_defaults() {
     board_data="$url/json/v1/$release/targets/$target/$board.json"
 
     if $verbose; then
-        echo "Board-name  $board"
-        echo "Target      $target"
-        echo "Version     $version"
-        echo "Fetching $board_data"
+        echo "Fetching $board_data to $pkg_json"
     fi
     wget -q -O $pkg_json "$board_data"
+
+    # We grab package arch from the json, not the machine, because we may
+    # expand this someday to use for cross device checking (say, to check
+    # updates for your Archer from your x86).
+    eval "$(jsonfilter -i $pkg_json -e 'package_arch=$.arch_packages')"
+
     {
         echo 'kernel'
         jsonfilter -i $pkg_json \
             -e '$.default_packages.*' \
             -e '$.device_packages.*'
     } | sort -u > $pkg_defaults
+
+    if $verbose; then
+        echo "Board-name    $board"
+        echo "Target        $target"
+        echo "Version       $version"
+        echo "Root-FS-type  $fstype"
+        local b p
+        eval "$(jsonfilter -i $pkg_json -e 'b=$.build_at' -e 'p=$.image_prefix')"
+        echo "Image-prefix  $p"
+        echo "Build-at      $b"
+    fi
 }
 
 
@@ -189,6 +243,40 @@ what_provides() {
 
 #-------------------------------------------------------------------------------
 
+check_failures() {
+    # Crude attempt at finding any build issues with the packages.  Scrapes
+    # the html from the downloads status page.
+    # https://downloads.openwrt.org/snapshots/faillogs/mipsel_24kc/packages/
+    # https://downloads.openwrt.org/releases/faillogs-23.05/mipsel_24kc/packages/
+
+    if [ "$version" = 'SNAPSHOT' ]; then
+        location='snapshots/faillogs'
+    else
+        location=$(echo "$version" | awk -F'.' '{printf "releases/faillogs-%s.%s", $1, $2}')
+    fi
+    url="https://downloads.openwrt.org/$location/$package_arch/packages/"
+
+    if wget -q -O $pkg_fail "$url"; then
+        {
+            echo ''
+            echo "There are currently package build failures for $version $package_arch:"
+            bad_ones=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < "$pkg_fail")
+            for bad in $bad_ones; do
+                if grep "\b$bad\b" $pkg_installed; then
+                    msg='you have this installed, DO NOT UPGRADE'
+                else
+                    msg='package not installed locally, you should be ok'
+                fi
+                printf "  %-28s - %s\n" "$bad" "$msg"
+            done
+            echo "Details at $url"
+            echo ''
+        } >> "$pkg_info"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+
 rm -f $pkg_user
 get_defaults "$version_to"
 get_dependencies
@@ -219,26 +307,44 @@ while read -r pkg; do
         aliased=$(what_provides "$pkg")
         if [ -z "$aliased" ] || ! is_installed "$aliased"; then
             printf 'Warning: %-*s - default package is not present\n' "$wid" "$pkg"
+            if $inc_missing; then
+                printf '%s#missing\n' "$pkg" >> $pkg_user
+            fi
         else
             $verbose && printf 'Default: %-*s - replaced/provided by %s\n' "$wid" "$pkg" "$aliased"
         fi
     fi
 done < $pkg_defaults > $pkg_info
+
+if $check_failed; then
+    # This appends to $pkg_info...
+    check_failures
+fi
+
 if ! $quiet; then
+    echo ''
     cat $pkg_info
 fi
 
 if $keep; then
     if ! $quiet; then
         echo 'Keeping working files:'
-        ls -lh "$pkg_json" "$pkg_defaults" "$pkg_depends" "$pkg_installed"
+        ls -lh "$pkg_json" "$pkg_defaults" "$pkg_depends" "$pkg_installed" "$pkg_fail"
     fi
 else
     rm $pkg_json
     rm $pkg_defaults
     rm $pkg_depends
     rm $pkg_installed
+    [ -e $pkg_fail ] && rm $pkg_fail
 fi
+
+content=$(sort "$pkg_user") && echo "$content" > $pkg_user
 
 n_logged=$(wc -l < $pkg_user)
 ! $quiet && printf 'Done, logged %d of %d entries in %s\n' "$n_logged" "$examined" "$pkg_user"
+
+if $list_pkgs; then
+    $verbose && echo ''
+    awk -F'#|\t' '{printf "%s ", $1} END {printf "\n"}' installed-packages
+fi
