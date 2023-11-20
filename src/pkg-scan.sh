@@ -152,7 +152,8 @@ get_defaults() {
     if $verbose; then
         echo "Board-name    $board"
         echo "Target        $target"
-        echo "Version       $version"
+        echo "Package-arch  $package_arch"
+        echo "Version-to    $version"
         echo "Root-FS-type  $fstype"
         local b p
         eval "$(jsonfilter -i $pkg_json -e 'b=$.build_at' -e 'p=$.image_prefix')"
