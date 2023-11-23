@@ -141,7 +141,6 @@ get_defaults() {
     rm -f $pkg_plat
     if ! wget -q -O $pkg_plat "$board_data" || [ ! -e "$pkg_plat" ]; then
         echo 'ERROR: Could not download board json.  Check that version-to is correct.'
-        echo '       If so, then it is likely the ASU server is having issues.'
         show_versions
         exit 1
     fi
@@ -211,19 +210,28 @@ show_versions() {
     fi
 
     local latest branches versions
-    eval "$(jsonfilter -i overview.json \
+    eval "$(jsonfilter -i $pkg_vers \
             -e 'latest=$.latest.*' \
             -e 'branches=$.branches' \
             -e 'versions=$.branches[*].versions.*')"
 
     printf "\nValid version-to values from %s:\n" "$url"
-    for rel in $versions; do
-        if [ "$version_to" = "$rel" ]; then
-            printf "    %s     <<-- your version-to is correct\n" "$rel"
+    {
+        found=false
+        for rel in $versions; do
+            if [ "$version_to" = "$rel" ]; then
+                printf "    %s     <<-- your version-to is correct\n" "$rel"
+                found=true
+            else
+                printf "    %s\n" "$rel"
+            fi
+        done
+        if $found; then
+            printf "It is likely that the ASU server is having issues."
         else
-            printf "    %s\n" "$rel"
+            printf "Your selected version-to '$version_to' is invalid."
         fi
-    done | sort
+    } | sort
 }
 
 depends() {
