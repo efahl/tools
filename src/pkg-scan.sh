@@ -17,11 +17,14 @@ quiet=false
 version_to=''
 
 # Global variables
-version=''        # "SNAPSHOT" or "22.03.1"
+asu_url=$(uci get attendedsysupgrade.server.url)  # sysupgrade server base url
+version_from=''   # "SNAPSHOT" or "22.03.1"
+version_to=''     # "SNAPSHOT" or "22.03.1"
 package_arch=''   # "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53"
 
 # Files used.
-pkg_json=/tmp/pkg-platform.json
+pkg_plat=/tmp/pkg-platform.json
+pkg_vers=/tmp/pkg-overview.json
 pkg_fail=/tmp/pkg-failures.html
 pkg_defaults=/tmp/pkg-defaults
 pkg_depends=/tmp/pkg-depends
@@ -40,15 +43,16 @@ and list anything anomalous in '$pkg_info'.
     -d, --defaults  Log the installed default packages, not just the user-installed ones.
     -m, --missing   Log the missing default packages along with user-installed.
     --version-to V  Use 'V' as the current version instead of installed.
-    -f, --failed    Check for failed package builds on intended version.
+    -f, --failed    Check for failed package builds on intended version-to.
+
+    -c, --check     Most common checks: enable all of -d -m -k -f -v
 
   Output:
     -k, --keep      Save and ls intermediate files.
     -l, --list      Display package list on a single line, appropriate for builder.
     -v, --verbose   Print various diagnostics.
-    -q, --quiet     Do not print any standard output.
+    -q, --quiet     Do not print any standard output."
 
-    -x              Enable all of -d -m -k -l -f -v"
     exit 1
 }
 
@@ -62,17 +66,16 @@ while [ "$1" ]; do
         -q|--quiet   ) quiet=true ;;
         -l|--list    ) list_pkgs=true ;;
         -f|--failed  ) check_failed=true ;;
-        -x           )
+        -c|--check   )
             inc_defaults=true
             inc_missing=true
             keep=true
-            list_pkgs=true
             check_failed=true
             verbose=true
         ;;
         --version-to)
             shift
-            version_to="$1"
+            version_to=$(echo "$1" | awk '{print toupper($1)}')
         ;;
         *)
             usage
@@ -99,24 +102,23 @@ get_defaults() {
     # for any long period.  Packages may come or go, or be renamed...
     #
     # Globals defined here:
-    #     version      - "SNAPSHOT" or "22.03.1"
+    #     version_from - "SNAPSHOT" or "22.03.1"
+    #     version_to   - "SNAPSHOT" or "22.03.1"
     #     package_arch - "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53"
 
-    local url          # sysupgrade server base url
     local board_data   # synthesized url of board json
     local board        # "generic" (for x86) or "tplink,archer-c7-v4" or "linksys,e8450-ubi"
     local target       # "ath79/generic" or "mediatek/mt7622" or "x86/64"
     local release      # "snapshots" or "release/23.05.0"
     local fstype       # "ext4" or "squashfs"
 
-    url=$(uci get attendedsysupgrade.server.url)
     eval "$(ubus call system board | jsonfilter \
             -e 'board=$.board_name' \
             -e 'target=$.release.target' \
-            -e 'version=$.release.version' \
+            -e 'version_from=$.release.version' \
             -e 'fstype=$.rootfs_type')"
 
-    version=${1:-$version}  # User can override: SNAPSHOT or 22.03.5.  NOTE: Resets global!
+    version_to=${1:-$version_from}  # User can override: SNAPSHOT or 22.03.5.  NOTE: Resets global!
 
     #https://github.com/openwrt/packages/blob/master/utils/auc/src/auc.c#L756
     if [ "$target" = 'x86/64' ] || [ "$target" = 'x86/generic' ]; then
@@ -125,26 +127,33 @@ get_defaults() {
         board=$(echo $board | tr ',' '_')
     fi
 
-    if [ "$version" = 'SNAPSHOT' ]; then
+    if [ "$version_to" = 'SNAPSHOT' ]; then
         release='snapshots'
     else
-        release="releases/$version"
+        release="releases/$version_to"
     fi
-    board_data="$url/json/v1/$release/targets/$target/$board.json"
+    board_data="$asu_url/json/v1/$release/targets/$target/$board.json"
 
     if $verbose; then
-        echo "Fetching $board_data to $pkg_json"
+        echo "Fetching $board_data to $pkg_plat"
     fi
-    wget -q -O $pkg_json "$board_data"
+
+    rm -f $pkg_plat
+    if ! wget -q -O $pkg_plat "$board_data" || [ ! -e "$pkg_plat" ]; then
+        echo 'ERROR: Could not download board json.  Check that version-to is correct.'
+        echo '       If so, then it is likely the ASU server is having issues.'
+        show_versions
+        exit 1
+    fi
 
     # We grab package arch from the json, not the machine, because we may
     # expand this someday to use for cross device checking (say, to check
     # updates for your Archer from your x86).
-    eval "$(jsonfilter -i $pkg_json -e 'package_arch=$.arch_packages')"
+    eval "$(jsonfilter -i $pkg_plat -e 'package_arch=$.arch_packages')"
 
     {
         echo 'kernel'
-        jsonfilter -i $pkg_json \
+        jsonfilter -i $pkg_plat \
             -e '$.default_packages.*' \
             -e '$.device_packages.*'
     } | sort -u > $pkg_defaults
@@ -153,10 +162,11 @@ get_defaults() {
         echo "Board-name    $board"
         echo "Target        $target"
         echo "Package-arch  $package_arch"
-        echo "Version-to    $version"
         echo "Root-FS-type  $fstype"
+        echo "Version-from  $version_from"
+        echo "Version-to    $version_to"
         local b p
-        eval "$(jsonfilter -i $pkg_json -e 'b=$.build_at' -e 'p=$.image_prefix')"
+        eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix')"
         echo "Image-prefix  $p"
         echo "Build-at      $b"
     fi
@@ -190,6 +200,30 @@ get_dependencies() {
             package = "";
         }
     ' /usr/lib/opkg/status | sort > $pkg_depends
+}
+
+show_versions() {
+    rm -f $pkg_vers
+    local url="$asu_url/api/v1/overview"
+    if ! wget -q -O $pkg_vers "$url"; then
+        echo "ERROR: Could not access $url (ASU server down?)"
+        exit 1
+    fi
+
+    local latest branches versions
+    eval "$(jsonfilter -i overview.json \
+            -e 'latest=$.latest.*' \
+            -e 'branches=$.branches' \
+            -e 'versions=$.branches[*].versions.*')"
+
+    printf "\nValid version-to values from %s:\n" "$url"
+    for rel in $versions; do
+        if [ "$version_to" = "$rel" ]; then
+            printf "    %s     <<-- your version-to is correct\n" "$rel"
+        else
+            printf "    %s\n" "$rel"
+        fi
+    done | sort
 }
 
 depends() {
@@ -250,29 +284,28 @@ check_failures() {
     # https://downloads.openwrt.org/snapshots/faillogs/mipsel_24kc/packages/
     # https://downloads.openwrt.org/releases/faillogs-23.05/mipsel_24kc/packages/
 
-    if [ "$version" = 'SNAPSHOT' ]; then
+    if [ "$version_to" = 'SNAPSHOT' ]; then
         location='snapshots/faillogs'
     else
-        location=$(echo "$version" | awk -F'.' '{printf "releases/faillogs-%s.%s", $1, $2}')
+        location=$(echo "$version_to" | awk -F'.' '{printf "releases/faillogs-%s.%s", $1, $2}')
     fi
     url="https://downloads.openwrt.org/$location/$package_arch/packages/"
 
+    rm -f $pkg_fail
     if wget -q -O $pkg_fail "$url"; then
-        {
-            echo ''
-            echo "There are currently package build failures for $version $package_arch:"
-            bad_ones=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < "$pkg_fail")
-            for bad in $bad_ones; do
-                if grep "\b$bad\b" $pkg_installed; then
-                    msg='you have this installed, DO NOT UPGRADE'
-                else
-                    msg='package not installed locally, you should be ok'
-                fi
-                printf "  %-28s - %s\n" "$bad" "$msg"
-            done
-            echo "Details at $url"
-            echo ''
-        } >> "$pkg_info"
+        echo ''
+        echo "There are currently package build failures for $version_to $package_arch:"
+        bad_ones=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < $pkg_fail)
+        for bad in $bad_ones; do
+            if grep "\b$bad\b" $pkg_installed; then
+                msg='you have this installed, DO NOT UPGRADE'
+            else
+                msg='package not installed locally, you should be ok'
+            fi
+            printf "  %-28s - %s\n" "$bad" "$msg"
+        done
+        echo "Details at $url"
+        echo ''
     fi
 }
 
@@ -302,24 +335,24 @@ while read -r pkg; do
     fi
 done < $pkg_installed
 
-wid=$(wc -L < $pkg_defaults)
+widest=$(wc -L < $pkg_defaults)
 while read -r pkg; do
     if ! is_installed "$pkg"; then
         aliased=$(what_provides "$pkg")
         if [ -z "$aliased" ] || ! is_installed "$aliased"; then
-            printf 'Warning: %-*s - default package is not present\n' "$wid" "$pkg"
+            printf 'Warning: %-*s - default package is not present\n' "$widest" "$pkg"
             if $inc_missing; then
                 printf '%s#missing\n' "$pkg" >> $pkg_user
             fi
         else
-            $verbose && printf 'Default: %-*s - replaced/provided by %s\n' "$wid" "$pkg" "$aliased"
+            $verbose && printf 'Default: %-*s - replaced/provided by %s\n' "$widest" "$pkg" "$aliased"
         fi
     fi
 done < $pkg_defaults > $pkg_info
 
 if $check_failed; then
     # This appends to $pkg_info...
-    check_failures
+    check_failures >> $pkg_info
 fi
 
 if ! $quiet; then
@@ -330,14 +363,15 @@ fi
 if $keep; then
     if ! $quiet; then
         echo 'Keeping working files:'
-        ls -lh "$pkg_json" "$pkg_defaults" "$pkg_depends" "$pkg_installed" "$pkg_fail"
+        ls -lh "$pkg_plat" "$pkg_defaults" "$pkg_depends" "$pkg_installed" "$pkg_fail"
     fi
 else
-    rm $pkg_json
-    rm $pkg_defaults
-    rm $pkg_depends
-    rm $pkg_installed
-    [ -e $pkg_fail ] && rm $pkg_fail
+    rm -f $pkg_plat
+    rm -f $pkg_defaults
+    rm -f $pkg_depends
+    rm -f $pkg_installed
+    rm -f $pkg_fail
+    rm -f $pkg_vers
 fi
 
 content=$(sort "$pkg_user") && echo "$content" > $pkg_user
