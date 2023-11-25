@@ -12,8 +12,7 @@ inc_defaults=false
 inc_missing=false
 check_failed=false
 keep=false
-verbose=false
-quiet=false
+verbosity=0
 version_to=''
 
 # Global variables
@@ -29,29 +28,26 @@ pkg_fail=/tmp/pkg-failures.html
 pkg_defaults=/tmp/pkg-defaults
 pkg_depends=/tmp/pkg-depends
 pkg_installed=/tmp/pkg-installed
-pkg_user=./installed-packages
-pkg_info=./installed-info
+pkg_user=./pkg-scan-installed.txt
 
 usage() {
     echo "$0 [OPTION]...
 
-Compile a report of all user-installed packages into '$pkg_user',
-and list anything anomalous in '$pkg_info'.
+Compile a report of all user-installed packages into '$pkg_user'.
 
   Package processing:
-    -a, --all       Log packages that are dependencies, not just independent ones.
-    -d, --defaults  Log the installed default packages, not just the user-installed ones.
-    -m, --missing   Log the missing default packages along with user-installed.
-    --version-to V  Use 'V' as the current version instead of installed.
-    -f, --failed    Check for failed package builds on intended version-to.
+    -a, --all           Log packages that are dependencies, not just independent ones.
+    -d, --defaults      Log the installed default packages, not just the user-installed ones.
+    -m, --missing       Log the missing default packages along with user-installed.
+    -V, --version-to V  Use 'V' as the current version instead of installed.
+    -f, --failed        Check for failed package builds on intended version-to.
 
-    -c, --check     Most common checks: enable all of -d -m -k -f -v
+    -c, --check         Most common checks: enable all of -d -m -k -f -v
 
   Output:
-    -k, --keep      Save and ls intermediate files.
-    -l, --list      Display package list on a single line, appropriate for builder.
-    -v, --verbose   Print various diagnostics.
-    -q, --quiet     Do not print any standard output."
+    -k, --keep          Save and ls intermediate files.
+    -l, --list          Display package list on a single line, appropriate for builder.
+    -v, --verbose       Print various diagnostics.  Repeat for even more output."
 
     exit 1
 }
@@ -62,8 +58,7 @@ while [ "$1" ]; do
         -d|--defaults) inc_defaults=true ;;
         -m|--missing ) inc_missing=true ;;
         -k|--keep    ) keep=true ;;
-        -v|--verbose ) verbose=true ;;
-        -q|--quiet   ) quiet=true ;;
+        -v|--verbose ) verbosity=$((verbosity + 1)) ;;
         -l|--list    ) list_pkgs=true ;;
         -f|--failed  ) check_failed=true ;;
         -c|--check   )
@@ -71,9 +66,9 @@ while [ "$1" ]; do
             inc_missing=true
             keep=true
             check_failed=true
-            verbose=true
+            verbosity=$((verbosity + 1))
         ;;
-        --version-to)
+        -V|--version-to)
             shift
             version_to=$(echo "$1" | awk '{print toupper($1)}')
         ;;
@@ -83,6 +78,38 @@ while [ "$1" ]; do
     esac
     shift
 done
+
+#-------------------------------------------------------------------------------
+#-- Output and logging.
+
+log_error() {
+    # Print the message and quit with status=1.
+    if [ -t 0 ]; then
+        printf "%s\n" "$@" >&2
+    else
+        while read -r line ; do
+            printf "%s\n" "$line" >&2
+        done
+    fi
+}
+
+log() {
+    # Write to stdout if message verbosity <= system verbosity.
+    # level == 0 -> always write, no cli option set
+    # level == 1 -> more verbose, cli -v
+    # level == 2 -> very verbose, cli -v -v
+    level=$1
+    shift
+    [ "$level" -gt "$verbosity" ] && return
+
+    if [ -t 0 ]; then
+        printf "%s\n" "$@"
+    else
+        while read -r line ; do
+            printf "%s\n" "$line"
+        done
+    fi
+}
 
 #-------------------------------------------------------------------------------
 
@@ -134,14 +161,12 @@ get_defaults() {
     fi
     board_data="$asu_url/json/v1/$release/targets/$target/$board.json"
 
-    if $verbose; then
-        echo "Fetching $board_data to $pkg_plat"
-    fi
+    log 1 "Fetching $board_data to $pkg_plat"
 
     rm -f $pkg_plat
     if ! wget -q -O $pkg_plat "$board_data" || [ ! -e "$pkg_plat" ]; then
-        echo 'ERROR: Could not download board json.  Check that version-to is correct.'
-        show_versions
+        log_error 'ERROR: Could not download board json.  Checking that version-to is correct.'
+        show_versions | log_error
         exit 1
     fi
 
@@ -157,7 +182,7 @@ get_defaults() {
             -e '$.device_packages.*'
     } | sort -u > $pkg_defaults
 
-    if $verbose; then
+    {
         echo "Board-name    $board"
         echo "Target        $target"
         echo "Package-arch  $package_arch"
@@ -168,7 +193,8 @@ get_defaults() {
         eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix')"
         echo "Image-prefix  $p"
         echo "Build-at      $b"
-    fi
+        echo ""
+    } | log 1
 }
 
 
@@ -202,13 +228,17 @@ get_dependencies() {
 }
 
 show_versions() {
+    # Grab the ASU overview to get all the available versions, scan that
+    # for version-to and report.
     rm -f $pkg_vers
-    local url="$asu_url/api/v1/overview"
+#   local url="$asu_url/api/v1/overview"        # API
+    local url="$asu_url/json/v1/overview.json"  # Static
     if ! wget -q -O $pkg_vers "$url"; then
-        echo "ERROR: Could not access $url (ASU server down?)"
+        log_error "ERROR: Could not access $url (ASU server down?)"
         exit 1
     fi
 
+    # shellcheck disable=SC2034 # 'latest' and 'branches' are unused, but may be someday.
     local latest branches versions
     eval "$(jsonfilter -i $pkg_vers \
             -e 'latest=$.latest.*' \
@@ -229,10 +259,11 @@ show_versions() {
         if $found; then
             printf "It is likely that the ASU server is having issues."
         else
-            printf "Your selected version-to '$version_to' is invalid."
+            printf "Your selected version-to '%s' is invalid." "$version_to"
         fi
     } | sort
 }
+
 
 depends() {
     # Given a package, return the list of packages it depends upon, i.e., those
@@ -241,7 +272,6 @@ depends() {
     local pkg="$1"
     awk -F':' '/^'"$pkg"':/ {$1 = ""; print}' $pkg_depends
 }
-
 
 what_depends() {
     # Given a package, return the list of packages that depend on it.  If the
@@ -301,19 +331,25 @@ check_failures() {
 
     rm -f $pkg_fail
     if wget -q -O $pkg_fail "$url"; then
-        echo ''
         echo "There are currently package build failures for $version_to $package_arch:"
+
+        # Scraping the html is a total hack.
+        # Let me know if you have an API on downloads that can give this info.
         bad_ones=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < $pkg_fail)
+
+        found=false
         for bad in $bad_ones; do
-            if grep "\b$bad\b" $pkg_installed; then
-                msg='you have this installed, DO NOT UPGRADE'
+            if grep -q "\b$bad\b" $pkg_installed; then
+                msg='ERROR: You have this installed, DO NOT UPGRADE!'
+                found=true
             else
-                msg='package not installed locally, you should be ok'
+                msg='Package not installed locally, you should be ok'
             fi
             printf "  %-28s - %s\n" "$bad" "$msg"
         done
+        $found && echo -n "NOTE THE ERRORS ABOVE: "
         echo "Details at $url"
-        echo ''
+        echo ""
     fi
 }
 
@@ -327,12 +363,12 @@ get_installed
 examined=0
 while read -r pkg; do
     examined=$((examined + 1))
-#   ! $quiet && printf '%5d - %-40s\r' "$examined" "$pkg"
+#   log 3 $(printf '%5d - %-40s\r' "$examined" "$pkg")  # except log does newline...
     deps=$(what_depends "$pkg")
     suffix=''
     if is_default "$pkg"; then
         if ! $inc_defaults; then
-            $verbose && echo "Skipping default package: $pkg"
+            log 2 "Skipping default package: $pkg"
             continue
         fi
         suffix="#default"
@@ -348,31 +384,25 @@ while read -r pkg; do
     if ! is_installed "$pkg"; then
         aliased=$(what_provides "$pkg")
         if [ -z "$aliased" ] || ! is_installed "$aliased"; then
-            printf 'Warning: %-*s - default package is not present\n' "$widest" "$pkg"
+            printf 'Warning: %-*s - default package is not present\n' "$widest" "$pkg" | log 1
             if $inc_missing; then
                 printf '%s#missing\n' "$pkg" >> $pkg_user
             fi
         else
-            $verbose && printf 'Default: %-*s - replaced/provided by %s\n' "$widest" "$pkg" "$aliased"
+            printf 'Default: %-*s - replaced/provided by %s\n' "$widest" "$pkg" "$aliased" | log 1
         fi
     fi
-done < $pkg_defaults > $pkg_info
+done < $pkg_defaults
+log 1 ''
 
 if $check_failed; then
-    # This appends to $pkg_info...
-    check_failures >> $pkg_info
-fi
-
-if ! $quiet; then
-    echo ''
-    cat $pkg_info
+    log 0 "$(check_failures)"
+    log 1 ''
 fi
 
 if $keep; then
-    if ! $quiet; then
-        echo 'Keeping working files:'
-        ls -lh "$pkg_plat" "$pkg_defaults" "$pkg_depends" "$pkg_installed" "$pkg_fail"
-    fi
+    log 1 'Keeping working files:'
+    log 1 "$(ls -lh $pkg_plat $pkg_defaults $pkg_depends $pkg_installed $pkg_fail)"
 else
     rm -f $pkg_plat
     rm -f $pkg_defaults
@@ -385,9 +415,9 @@ fi
 content=$(sort "$pkg_user") && echo "$content" > $pkg_user
 
 n_logged=$(wc -l < $pkg_user)
-! $quiet && printf 'Done, logged %d of %d entries in %s\n' "$n_logged" "$examined" "$pkg_user"
+printf 'Done, logged %d of %d entries in %s\n' "$n_logged" "$examined" "$pkg_user" | log 1
 
 if $list_pkgs; then
-    $verbose && echo ''
-    awk -F'#|\t' '{printf "%s ", $1} END {printf "\n"}' installed-packages
+    log 1 ''
+    awk -F'#|\t' '{printf "%s ", $1} END {printf "\n"}' $pkg_user
 fi
