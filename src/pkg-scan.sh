@@ -16,7 +16,7 @@ verbosity=0
 version_to=''
 
 # Global variables
-asu_url=$(uci get attendedsysupgrade.server.url)  # sysupgrade server base url
+asu_url=$(uci get attendedsysupgrade.server.url || echo 'https://sysupgrade.openwrt.org')  # sysupgrade server base url
 version_from=''   # "SNAPSHOT" or "22.03.1"
 version_to=''     # "SNAPSHOT" or "22.03.1"
 package_arch=''   # "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53"
@@ -82,15 +82,20 @@ done
 #-------------------------------------------------------------------------------
 #-- Output and logging.
 
-log_error() {
-    # Print the message and quit with status=1.
+_log_() {
+    # Log a message from the command line, or piped from stdin.
     if [ -t 0 ]; then
-        printf "%s\n" "$@" >&2
+        printf "%s\n" "$@"
     else
         while read -r line ; do
-            printf "%s\n" "$line" >&2
+            printf "%s\n" "$line"
         done
     fi
+}
+
+log_error() {
+    # Print the messages to stderr.
+    _log_ "$@" >&2
 }
 
 log() {
@@ -98,16 +103,10 @@ log() {
     # level == 0 -> always write, no cli option set
     # level == 1 -> more verbose, cli -v
     # level == 2 -> very verbose, cli -v -v
-    level=$1
-    shift
-    [ "$level" -gt "$verbosity" ] && return
-
-    if [ -t 0 ]; then
-        printf "%s\n" "$@"
-    else
-        while read -r line ; do
-            printf "%s\n" "$line"
-        done
+    level="$1"
+    if [ "$level" -le "$verbosity" ]; then
+        shift
+        _log_ "$@"
     fi
 }
 
@@ -182,19 +181,19 @@ get_defaults() {
             -e '$.device_packages.*'
     } | sort -u > $pkg_defaults
 
-    {
-        echo "Board-name    $board"
-        echo "Target        $target"
-        echo "Package-arch  $package_arch"
-        echo "Root-FS-type  $fstype"
-        echo "Version-from  $version_from"
-        echo "Version-to    $version_to"
-        local b p
-        eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix')"
-        echo "Image-prefix  $p"
-        echo "Build-at      $b"
-        echo ""
-    } | log 1
+    local b p
+    eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix')"
+    log 1 << INFO
+        Board-name    $board
+        Target        $target
+        Package-arch  $package_arch
+        Root-FS-type  $fstype
+        Version-from  $version_from
+        Version-to    $version_to
+        Image-prefix  $p
+        Build-at      $b
+
+INFO
 }
 
 
@@ -316,6 +315,26 @@ what_provides() {
 
 #-------------------------------------------------------------------------------
 
+check_defaults() {
+    # Scan the package defaults to see if they are 1) missing from the
+    # installation or 2) modified/replaced by some other package.
+
+    widest=$(wc -L < $pkg_defaults)
+    while read -r pkg; do
+        if ! is_installed "$pkg"; then
+            aliased=$(what_provides "$pkg")
+            if [ -z "$aliased" ] || ! is_installed "$aliased"; then
+                printf 'Warning: %-*s - default package is not present\n' "$widest" "$pkg"
+                if $inc_missing; then
+                    printf '%s#missing\n' "$pkg" >> $pkg_user
+                fi
+            else
+                printf 'Default: %-*s - replaced/provided by %s\n' "$widest" "$pkg" "$aliased"
+            fi
+        fi
+    done < $pkg_defaults
+}
+
 check_failures() {
     # Crude attempt at finding any build issues with the packages.  Scrapes
     # the html from the downloads status page.
@@ -337,6 +356,7 @@ check_failures() {
         # Let me know if you have an API on downloads that can give this info.
         bad_ones=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < $pkg_fail)
 
+        widest=$(echo "$bad_ones" | tr ' ' '\n' | wc -L)
         found=false
         for bad in $bad_ones; do
             if grep -q "\b$bad\b" $pkg_installed; then
@@ -345,7 +365,7 @@ check_failures() {
             else
                 msg='Package not installed locally, you should be ok'
             fi
-            printf "  %-28s - %s\n" "$bad" "$msg"
+            printf "  %-*s - %s\n" "$widest" "$bad" "$msg"
         done
         $found && echo -n "NOTE THE ERRORS ABOVE: "
         echo "Details at $url"
@@ -379,20 +399,7 @@ while read -r pkg; do
     fi
 done < $pkg_installed
 
-widest=$(wc -L < $pkg_defaults)
-while read -r pkg; do
-    if ! is_installed "$pkg"; then
-        aliased=$(what_provides "$pkg")
-        if [ -z "$aliased" ] || ! is_installed "$aliased"; then
-            printf 'Warning: %-*s - default package is not present\n' "$widest" "$pkg" | log 1
-            if $inc_missing; then
-                printf '%s#missing\n' "$pkg" >> $pkg_user
-            fi
-        else
-            printf 'Default: %-*s - replaced/provided by %s\n' "$widest" "$pkg" "$aliased" | log 1
-        fi
-    fi
-done < $pkg_defaults
+log 1 "$(check_defaults)"
 log 1 ''
 
 if $check_failed; then
