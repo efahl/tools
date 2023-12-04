@@ -25,9 +25,9 @@ package_arch=''   # "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53"
 pkg_plat=/tmp/pkg-platform.json
 pkg_vers=/tmp/pkg-overview.json
 pkg_fail=/tmp/pkg-failures.html
-pkg_defaults=/tmp/pkg-defaults
-pkg_depends=/tmp/pkg-depends
-pkg_installed=/tmp/pkg-installed
+pkg_defaults=/tmp/pkg-defaults.txt
+pkg_depends=/tmp/pkg-depends.txt
+pkg_installed=/tmp/pkg-installed.txt
 pkg_user=./pkg-scan-installed.txt
 
 usage() {
@@ -134,6 +134,7 @@ get_defaults() {
 
     local board_data   # synthesized url of board json
     local board        # "generic" (for x86) or "tplink,archer-c7-v4" or "linksys,e8450-ubi"
+    local build_from   # Current build on device
     local target       # "ath79/generic" or "mediatek/mt7622" or "x86/64"
     local release      # "snapshots" or "release/23.05.0"
     local fstype       # "ext4" or "squashfs"
@@ -142,6 +143,7 @@ get_defaults() {
             -e 'board=$.board_name' \
             -e 'target=$.release.target' \
             -e 'version_from=$.release.version' \
+            -e 'build_from=$.release.revision' \
             -e 'fstype=$.rootfs_type')"
 
     version_to=${1:-$version_from}  # User can override: SNAPSHOT or 22.03.5.  NOTE: Resets global!
@@ -182,14 +184,14 @@ get_defaults() {
     } | sort -u > $pkg_defaults
 
     local b p
-    eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix')"
+    eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix' -e 'build_to=$.version_code')"
     log 1 << INFO
         Board-name    $board
         Target        $target
         Package-arch  $package_arch
         Root-FS-type  $fstype
-        Version-from  $version_from
-        Version-to    $version_to
+        Version-from  $version_from $build_from
+        Version-to    $version_to $build_to
         Image-prefix  $p
         Build-at      $b
 
@@ -316,8 +318,13 @@ what_provides() {
 #-------------------------------------------------------------------------------
 
 check_defaults() {
-    # Scan the package defaults to see if they are 1) missing from the
-    # installation or 2) modified/replaced by some other package.
+    # Scan the package defaults to see if they are
+    #    1) missing from the installation or
+    #    2) modified/replaced by some other package.
+    #
+    # If you specify '-m', then the missing default packages will be included
+    # in the "user installed" package list.  If you have manually removed them,
+    # then '-m" will undo those removals.
 
     widest=$(wc -L < $pkg_defaults)
     while read -r pkg; do
