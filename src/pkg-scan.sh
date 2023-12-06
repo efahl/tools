@@ -47,7 +47,10 @@ Compile a report of all user-installed packages into '$pkg_user'.
   Output:
     -k, --keep          Save and ls intermediate files.
     -l, --list          Display package list on a single line, appropriate for builder.
-    -v, --verbose       Print various diagnostics.  Repeat for even more output."
+    -v, --verbose       Print various diagnostics.  Repeat for even more output.
+
+'Version-from' is version and revision currently installed on this device.
+'Version-to' is derived from downloaded platform.json file."
 
     exit 1
 }
@@ -124,7 +127,7 @@ get_defaults() {
     #
     # SNAPSHOT WARNING!
     # This might fail miserably for SNAPHOT boxes that are well out of date,
-    # as the contents of snaphot builds is neither versioned nor maintained
+    # as the contents of snapshot builds is neither versioned nor maintained
     # for any long period.  Packages may come or go, or be renamed...
     #
     # Globals defined here:
@@ -138,6 +141,7 @@ get_defaults() {
     local target       # "ath79/generic" or "mediatek/mt7622" or "x86/64"
     local release      # "snapshots" or "release/23.05.0"
     local fstype       # "ext4" or "squashfs"
+    local sutype       # Sysupgrade type, combined-efi or sysupgrade
 
     eval "$(ubus call system board | jsonfilter \
             -e 'board=$.board_name' \
@@ -151,8 +155,14 @@ get_defaults() {
     #https://github.com/openwrt/packages/blob/master/utils/auc/src/auc.c#L756
     if [ "$target" = 'x86/64' ] || [ "$target" = 'x86/generic' ]; then
         board='generic'
+        sutype='combined'
     else
         board=$(echo $board | tr ',' '_')
+        sutype='sysupgrade'
+    fi
+
+    if [ -d /sys/firmware/efi ]; then
+        sutype="${sutype}-efi"
     fi
 
     if [ "$version_to" = 'SNAPSHOT' ]; then
@@ -192,7 +202,7 @@ get_defaults() {
         Root-FS-type  $fstype
         Version-from  $version_from $build_from
         Version-to    $version_to $build_to
-        Image-prefix  $p
+        Image-prefix  $p  $sutype
         Build-at      $b
 
 INFO
