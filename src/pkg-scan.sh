@@ -17,12 +17,14 @@ version_to=''
 
 # Global variables
 asu_url=$(uci get attendedsysupgrade.server.url || echo 'https://sysupgrade.openwrt.org')  # sysupgrade server base url
+dwn_url='https://downloads.openwrt.org'
 version_from=''   # "SNAPSHOT" or "22.03.1"
 version_to=''     # "SNAPSHOT" or "22.03.1"
 package_arch=''   # "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53"
 
 # Files used.
 pkg_plat=/tmp/pkg-platform.json
+pkg_prof=/tmp/pkg-profiles.json
 pkg_vers=/tmp/pkg-overview.json
 pkg_fail=/tmp/pkg-failures.html
 pkg_defaults=/tmp/pkg-defaults.txt
@@ -172,7 +174,7 @@ get_defaults() {
     fi
     board_data="$asu_url/json/v1/$release/targets/$target/$board.json"
 
-    log 1 "Fetching $board_data to $pkg_plat"
+    log 2 "Fetching $board_data to $pkg_plat"
 
     rm -f $pkg_plat
     if ! wget -q -O $pkg_plat "$board_data" || [ ! -e "$pkg_plat" ]; then
@@ -193,16 +195,34 @@ get_defaults() {
             -e '$.device_packages.*'
     } | sort -u > $pkg_defaults
 
+    # Collect information about the actual installation image.
+    board_prof="$dwn_url/$release/targets/$target/profiles.json"
+
+    log 2 "Fetching $board_prof to $pkg_prof"
+
+    rm -f $pkg_prof
+    if ! wget -q -O $pkg_prof "$board_prof" || [ ! -e "$pkg_plat" ]; then
+        log_error 'ERROR: Could not download profiles json.  Checking that version-to is correct.'
+        show_versions | log_error
+        exit 1
+    fi
+    img_available=$(jsonfilter -i $pkg_prof \
+        -e "$.profiles['${board}'].images.*.name")
+    img_file=$(jsonfilter -i $pkg_prof \
+        -e "$.profiles['${board}'].images[@['type']='${sutype}' && @['filesystem']='${fstype}'].name")
+
     local b p
     eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix' -e 'build_to=$.version_code')"
     log 1 << INFO
         Board-name    $board
         Target        $target
         Package-arch  $package_arch
-        Root-FS-type  $fstype
         Version-from  $version_from $build_from
         Version-to    $version_to $build_to
-        Image-prefix  $p  $sutype
+        Image-prefix  $p
+        Root-FS-type  $fstype
+        Sys-type      $sutype
+        Image-file    $img_file
         Build-at      $b
 
 INFO
@@ -244,6 +264,7 @@ show_versions() {
     rm -f $pkg_vers
 #   local url="$asu_url/api/v1/overview"        # API
     local url="$asu_url/json/v1/overview.json"  # Static
+    log 2 "Fetching $url to $pkg_vers"
     if ! wget -q -O $pkg_vers "$url"; then
         log_error "ERROR: Could not access $url (ASU server down?)"
         exit 1
@@ -363,9 +384,10 @@ check_failures() {
     else
         location=$(echo "$version_to" | awk -F'.' '{printf "releases/faillogs-%s.%s", $1, $2}')
     fi
-    url="https://downloads.openwrt.org/$location/$package_arch/packages/"
+    url="$dwn_url/$location/$package_arch/packages/"
 
     rm -f $pkg_fail
+    log 2 "Fetching $url to $pkg_fail"
     if wget -q -O $pkg_fail "$url"; then
         echo "There are currently package build failures for $version_to $package_arch:"
 
@@ -426,9 +448,10 @@ fi
 
 if $keep; then
     log 1 'Keeping working files:'
-    log 1 "$(ls -lh $pkg_plat $pkg_defaults $pkg_depends $pkg_installed $pkg_fail)"
+    log 1 "$(ls -lh $pkg_plat $pkg_prof $pkg_defaults $pkg_depends $pkg_installed $pkg_fail)"
 else
     rm -f $pkg_plat
+    rm -f $pkg_prof
     rm -f $pkg_defaults
     rm -f $pkg_depends
     rm -f $pkg_installed
