@@ -2,7 +2,7 @@
 # Copyright (c) 2023 Eric Fahlgren <eric.fahlgren@gmail.com>
 # SPDX-License-Identifier: GPL-2.0
 # vim: set expandtab softtabstop=4 shiftwidth=4:
-# shellcheck disable=SC2039  # "local" not defined in POSIX sh
+# shellcheck disable=SC2039,SC2155  # "local" not defined in POSIX sh
 #-------------------------------------------------------------------------------
 
 # User options, see 'usage'.
@@ -25,6 +25,7 @@ package_arch=''   # "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53"
 # Files used.
 pkg_plat=/tmp/pkg-platform.json
 pkg_prof=/tmp/pkg-profiles.json
+pkg_bom=/tmp/pkg-bom.json
 pkg_vers=/tmp/pkg-overview.json
 pkg_fail=/tmp/pkg-failures.html
 pkg_defaults=/tmp/pkg-defaults.txt
@@ -44,9 +45,10 @@ Compile a report of all user-installed packages into '$pkg_user'.
     -V, --version-to V  Use 'V' as the current version instead of installed.
     -f, --failed        Check for failed package builds on intended version-to.
 
-    -c, --check         Most common checks: enable all of -d -m -k -f -v
+    -c, --check         Most common checks: enable all of -d -m -f -v
 
   Output:
+    -o, --output F      Path to which scan results are written, default '$pkg_user'
     -k, --keep          Save and ls intermediate files.
     -l, --list          Display package list on a single line, appropriate for builder.
     -v, --verbose       Print various diagnostics.  Repeat for even more output.
@@ -66,10 +68,13 @@ while [ "$1" ]; do
         -v|--verbose ) verbosity=$((verbosity + 1)) ;;
         -l|--list    ) list_pkgs=true ;;
         -f|--failed  ) check_failed=true ;;
+	-o|--output  )
+	    pkg_user=$2
+	    shift
+	;;
         -c|--check   )
             inc_defaults=true
             inc_missing=true
-            keep=true
             check_failed=true
             verbosity=$((verbosity + 1))
         ;;
@@ -139,6 +144,7 @@ get_defaults() {
 
     local board_data   # synthesized url of board json
     local board        # "generic" (for x86) or "tplink,archer-c7-v4" or "linksys,e8450-ubi"
+    local kver_from    # Kernel version that is currently running
     local build_from   # Current build on device
     local target       # "ath79/generic" or "mediatek/mt7622" or "x86/64"
     local release      # "snapshots" or "release/23.05.0"
@@ -147,6 +153,7 @@ get_defaults() {
 
     eval "$(ubus call system board | jsonfilter \
             -e 'board=$.board_name' \
+            -e 'kver_from=$.kernel' \
             -e 'target=$.release.target' \
             -e 'version_from=$.release.version' \
             -e 'build_from=$.release.revision' \
@@ -196,7 +203,7 @@ get_defaults() {
     } | sort -u > $pkg_defaults
 
     # Collect information about the actual installation image.
-    board_prof="$dwn_url/$release/targets/$target/profiles.json"
+    local board_prof="$dwn_url/$release/targets/$target/profiles.json"
 
     log 2 "Fetching $board_prof to $pkg_prof"
 
@@ -206,19 +213,34 @@ get_defaults() {
         show_versions | log_error
         exit 1
     fi
-    img_available=$(jsonfilter -i $pkg_prof \
-        -e "$.profiles['${board}'].images.*.name")
-    img_file=$(jsonfilter -i $pkg_prof \
+
+    #local img_available=$(jsonfilter -i $pkg_prof \
+    #    -e "$.profiles['${board}'].images.*.name")
+    local img_file=$(jsonfilter -i $pkg_prof \
         -e "$.profiles['${board}'].images[@['type']='${sutype}' && @['filesystem']='${fstype}'].name")
 
-    local b p
+    # Get the board BOM as it contains the package and kernel versions
+    local prefix="openwrt-"
+    [ "$version_to" = 'SNAPSHOT' ] || prefix="${prefix}${version_to}-"
+    local board_bom="$dwn_url/$release/targets/$target/${prefix}${target/\//-}.bom.cdx.json"
+
+    log 2 "Fetching $board_bom to $pkg_bom"
+
+    rm -f $pkg_bom
+    if ! wget -q -O $pkg_bom "$board_bom"; then
+        log_error "ERROR: Could not access BOM at $board_bom"
+        exit 1
+    fi
+    local kver_to=$(jsonfilter -i $pkg_bom -e '$[*][@.name = "kernel"].version')
+
+    local b p build_to
     eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix' -e 'build_to=$.version_code')"
     log 1 << INFO
         Board-name    $board
         Target        $target
         Package-arch  $package_arch
-        Version-from  $version_from $build_from
-        Version-to    $version_to $build_to
+        Version-from  $version_from $build_from (kernel $kver_from)
+        Version-to    $version_to $build_to (kernel $kver_to)
         Image-prefix  $p
         Root-FS-type  $fstype
         Sys-type      $sutype
@@ -364,7 +386,7 @@ check_defaults() {
             if [ -z "$aliased" ] || ! is_installed "$aliased"; then
                 printf 'Warning: %-*s - default package is not present\n' "$widest" "$pkg"
                 if $inc_missing; then
-                    printf '%s#missing\n' "$pkg" >> $pkg_user
+                    printf '%s#missing\n' "$pkg" >> "$pkg_user"
                 fi
             else
                 printf 'Default: %-*s - replaced/provided by %s\n' "$widest" "$pkg" "$aliased"
@@ -414,7 +436,7 @@ check_failures() {
 
 #-------------------------------------------------------------------------------
 
-rm -f $pkg_user
+rm -f "$pkg_user"
 get_defaults "$version_to"
 get_dependencies
 get_installed
@@ -434,7 +456,7 @@ while read -r pkg; do
     fi
     count=$(echo "$deps" | wc -w)
     if $list_all || [ "$count" -eq 0 ]; then
-        printf '%s%s\t%s\n' "$pkg" "$suffix" "$deps" | sed 's/\s*$//' >> $pkg_user
+        printf '%s%s\t%s\n' "$pkg" "$suffix" "$deps" | sed 's/\s*$//' >> "$pkg_user"
     fi
 done < $pkg_installed
 
@@ -448,10 +470,11 @@ fi
 
 if $keep; then
     log 1 'Keeping working files:'
-    log 1 "$(ls -lh $pkg_plat $pkg_prof $pkg_defaults $pkg_depends $pkg_installed $pkg_fail)"
+    log 1 "$(ls -lh $pkg_plat $pkg_prof $pkg_bom $pkg_defaults $pkg_depends $pkg_installed $pkg_fail)"
 else
     rm -f $pkg_plat
     rm -f $pkg_prof
+    rm -f $pkg_bom
     rm -f $pkg_defaults
     rm -f $pkg_depends
     rm -f $pkg_installed
@@ -459,12 +482,12 @@ else
     rm -f $pkg_vers
 fi
 
-content=$(sort "$pkg_user") && echo "$content" > $pkg_user
+content=$(sort "$pkg_user") && echo "$content" > "$pkg_user"
 
-n_logged=$(wc -l < $pkg_user)
+n_logged=$(wc -l < "$pkg_user")
 printf 'Done, logged %d of %d entries in %s\n' "$n_logged" "$examined" "$pkg_user" | log 1
 
 if $list_pkgs; then
     log 1 ''
-    awk -F'#|\t' '{printf "%s ", $1} END {printf "\n"}' $pkg_user
+    awk -F'#|\t' '{printf "%s ", $1} END {printf "\n"}' "$pkg_user"
 fi
