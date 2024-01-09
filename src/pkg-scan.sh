@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2023 Eric Fahlgren <eric.fahlgren@gmail.com>
+# Copyright (c) 2023-2024 Eric Fahlgren <eric.fahlgren@gmail.com>
 # SPDX-License-Identifier: GPL-2.0
 # vim: set expandtab softtabstop=4 shiftwidth=4:
 # shellcheck disable=SC2039,SC2155  # "local" not defined in POSIX sh
@@ -68,10 +68,10 @@ while [ "$1" ]; do
         -v|--verbose ) verbosity=$((verbosity + 1)) ;;
         -l|--list    ) list_pkgs=true ;;
         -f|--failed  ) check_failed=true ;;
-	-o|--output  )
-	    pkg_user=$2
-	    shift
-	;;
+        -o|--output  )
+            pkg_user=$2
+            shift
+        ;;
         -c|--check   )
             inc_defaults=true
             inc_missing=true
@@ -159,7 +159,7 @@ get_defaults() {
             -e 'build_from=$.release.revision' \
             -e 'fstype=$.rootfs_type')"
 
-    version_to=${1:-$version_from}  # User can override: SNAPSHOT or 22.03.5.  NOTE: Resets global!
+    version_to="${1:-$version_from}"  # User can override: SNAPSHOT or 22.03.5.  NOTE: Resets global!
 
     #https://github.com/openwrt/packages/blob/master/utils/auc/src/auc.c#L756
     if [ "$target" = 'x86/64' ] || [ "$target" = 'x86/generic' ]; then
@@ -220,21 +220,25 @@ get_defaults() {
         -e "$.profiles['${board}'].images[@['type']='${sutype}' && @['filesystem']='${fstype}'].name")
 
     # Get the board BOM as it contains the package and kernel versions
+    local b p build_to
+    eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix' -e 'build_to=$.version_code')"
+
     local prefix="openwrt-"
     [ "$version_to" = 'SNAPSHOT' ] || prefix="${prefix}${version_to}-"
+    [[ "$version_to" =~ .*-SNAPSHOT ]] && prefix="$(echo "$prefix" | awk '{print tolower($1)}')${build_to}-"
     local board_bom="$dwn_url/$release/targets/$target/${prefix}${target/\//-}.bom.cdx.json"
 
     log 2 "Fetching $board_bom to $pkg_bom"
 
     rm -f $pkg_bom
+    local kver_to
     if ! wget -q -O $pkg_bom "$board_bom"; then
         log_error "ERROR: Could not access BOM at $board_bom"
-        exit 1
+        kver_to="unknown"
+    else
+        kver_to=$(jsonfilter -i $pkg_bom -e '$[*][@.name = "kernel"].version')
     fi
-    local kver_to=$(jsonfilter -i $pkg_bom -e '$[*][@.name = "kernel"].version')
 
-    local b p build_to
-    eval "$(jsonfilter -i $pkg_plat -e 'b=$.build_at' -e 'p=$.image_prefix' -e 'build_to=$.version_code')"
     log 1 << INFO
         Board-name    $board
         Target        $target
