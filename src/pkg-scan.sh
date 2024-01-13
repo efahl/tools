@@ -5,6 +5,8 @@
 # shellcheck disable=SC2039,SC2155  # "local" not defined in POSIX sh
 #-------------------------------------------------------------------------------
 
+set -u  # Make all undefined refs into errors.
+
 # User options, see 'usage'.
 list_all=false
 list_pkgs=false
@@ -16,8 +18,9 @@ verbosity=0
 
 # Global variables
 url_sysupgrade=$(uci get attendedsysupgrade.server.url || echo 'https://sysupgrade.openwrt.org')  # sysupgrade server base url
-url_downloads='https://downloads.openwrt.org'
+url_downloads='https://downloads.openwrt.org'         # This should be in config, too.
 url_overview="$url_sysupgrade/json/v1/overview.json"  # Static
+url_failure=''                                        # Composed in dl_failures
 
 # Files used.
 tmp_loc='/tmp/pkg-'
@@ -75,54 +78,56 @@ log() {
 #-------------------------------------------------------------------------------
 #-- Globals state values -------------------------------------------------------
 
-version_from=''   # Full version name currently installed: "SNAPSHOT" or "22.03.1"
-version_to=''     # Full version name of target: "23.05.2" or "SNAPSHOT"
-package_arch=''   # "x86_64" or "mipsel_24kc" or "aarch64_cortex-a53", contained in pkg_platform_json
+dev_arch=''       # "x86_64" or "mipsel_24kc"   or "aarch64_cortex-a53", contained in pkg_platform_json
+dev_target=''     # "x86/64" or "ath79/generic" or "mediatek/mt7622", from board file
+dev_platform=''   # "generic" (for x86) or "tplink,archer-c7-v4" or "linksys,e8450-ubi"
+dev_fstype=''     # "ext4" or "squashfs"
+dev_sutype=''     # Sysupgrade type, combined-efi or sysupgrade
 
-target=''         # "ath79/generic" or "mediatek/mt7622" or "x86/64"
-platform=''          # "generic" (for x86) or "tplink,archer-c7-v4" or "linksys,e8450-ubi"
-fstype=''         # "ext4" or "squashfs"
-sutype=''         # Sysupgrade type, combined-efi or sysupgrade
+bld_ver_from=''   # Full version name currently installed: "SNAPSHOT" or "22.03.1"
+bld_kver_from=''  # Kernel version that is currently running
+bld_num_from=''   # Current build on device
 
-kver_from=''      # Kernel version that is currently running
-kver_to=''        # Kernel version of target build, extracted from BOM
-build_from=''     # Current build on device
-branch=''         # Branch name: "SNAPSHOT" or "21.07" or "23.05"
-ver_dir=''        # ASU and DL server branch directory: "snapshots" or "release/23.05.0"
+bld_ver_to=''     # Full version name of target: "23.05.2" or "SNAPSHOT"
+bld_kver_to=''    # Kernel version of target build, extracted from BOM
+bld_num_to=''     # Build number from target
+bld_date=''       # Build date of target
+
+rel_branch=''     # Release branch name: "SNAPSHOT" or "21.07" or "23.05"
+rel_dir=''        # ASU and DL server release branch directory: "snapshots" or "release/23.05.0"
 
 collect_config() {
     # Collect system state, and set source and target versions.
     eval "$(ubus call system board | jsonfilter \
-            -e 'platform=$.board_name' \
-            -e 'kver_from=$.kernel' \
-            -e 'target=$.release.target' \
-            -e 'version_from=$.release.version' \
-            -e 'build_from=$.release.revision' \
-            -e 'fstype=$.rootfs_type')"
+            -e 'dev_platform=$.board_name' \
+            -e 'bld_kver_from=$.kernel' \
+            -e 'dev_target=$.release.target' \
+            -e 'bld_ver_from=$.release.version' \
+            -e 'bld_num_from=$.release.revision' \
+            -e 'dev_fstype=$.rootfs_type')"
 
-    version_to="${1:-$version_from}"  # User can override: SNAPSHOT or 22.03.5.  NOTE: Resets global!
+    bld_ver_to="${1:-$bld_ver_from}"  # User can override: SNAPSHOT or 22.03.5.  NOTE: Resets global!
 
     #https://github.com/openwrt/packages/blob/master/utils/auc/src/auc.c#L756
-    if [ "$target" = 'x86/64' ] || [ "$target" = 'x86/generic' ]; then
-        platform='generic'
-        sutype='combined'
+    if [ "$dev_target" = 'x86/64' ] || [ "$dev_target" = 'x86/generic' ]; then
+        dev_platform='generic'
+        dev_sutype='combined'
     else
-        platform=$(echo $platform | tr ',' '_')
-        sutype='sysupgrade'
+        dev_platform="${dev_platform//,/_}"
+        dev_sutype='sysupgrade'
     fi
 
     if [ -d /sys/firmware/efi ]; then
-        sutype="${sutype}-efi"
+        dev_sutype="${dev_sutype}-efi"
     fi
 
-    if [ "$version_to" = 'SNAPSHOT' ]; then
-        ver_dir='snapshots'
-        branch='SNAPSHOT'
+    if [ "$bld_ver_to" = 'SNAPSHOT' ]; then
+        rel_dir='snapshots'
+        rel_branch='SNAPSHOT'
     else
-        ver_dir="releases/$version_to"
-        branch="$(echo "$version_to" | awk -F'.' '{printf "%s.%s", $1, $2}')"
+        rel_dir="releases/$bld_ver_to"
+        rel_branch="${bld_ver_to%.**}"
     fi
-
 }
 
 #-------------------------------------------------------------------------------
@@ -132,9 +137,9 @@ download() {
     local dst_file="$2"
     local msg="${3:-$ERROR Could not access $url (server down?)}"
 
-    rm -f $dst_file
+    rm -f "$dst_file"
     log 2 "Fetching $url to $dst_file"
-    if ! wget -q -O $dst_file "$url"; then
+    if ! wget -q -O "$dst_file" "$url"; then
         log_error "$msg"
         return 1
     fi
@@ -143,7 +148,7 @@ download() {
 
 dl_board() {
     # Get the starting point for the target build.
-    local url_platform="$url_sysupgrade/json/v1/$ver_dir/targets/$target/$platform.json"
+    local url_platform="$url_sysupgrade/json/v1/$rel_dir/targets/$dev_target/$dev_platform.json"
     local msg="$ERROR Could not download platform json.  Checking that version-to is correct."
     if ! download "$url_platform" "$pkg_platform_json" "$msg" || [ ! -e "$pkg_platform_json" ]; then
         show_versions | log_error
@@ -161,10 +166,10 @@ dl_packages() {
     #     https://sysupgrade.openwrt.org/json/v1/snapshots/targets/x86/64/index.json
     #     Contains things like "grub2" on x86_64 and "kmod-*" for everything.
 
-    local url_pkg_arch="$url_sysupgrade/json/v1/$ver_dir/packages/${package_arch}-index.json"
+    local url_pkg_arch="$url_sysupgrade/json/v1/$rel_dir/packages/${dev_arch}-index.json"
     download "$url_pkg_arch" "$pkg_pkg_arch_json"
 
-    local url_pkg_plat="$url_sysupgrade/json/v1/$ver_dir/targets/$target/index.json"
+    local url_pkg_plat="$url_sysupgrade/json/v1/$rel_dir/targets/$dev_target/index.json"
     download "$url_pkg_plat" "$pkg_pkg_platform_json"
 }
 
@@ -175,6 +180,8 @@ dl_overview() {
     # in overview.json at '$.branches', but we like overview as it has a few
     # more useful items.  It can be found at:
     #     url_branches="$url_sysupgrade/json/v1/branches.json"
+    #
+    # Uses global 'url_overview'
 
     if ! download "$url_overview" "$pkg_overview_json"; then
         exit 1
@@ -185,12 +192,30 @@ dl_bom() {
     # Download the platform BOM.
 
     local prefix="openwrt-"
-    [ "$version_to" = 'SNAPSHOT' ] || prefix="${prefix}${version_to}-"
-    [[ "$version_to" =~ .*-SNAPSHOT ]] && prefix="$(echo "$prefix" | awk '{print tolower($1)}')${build_to}-"
-    local url_bom="$url_downloads/$ver_dir/targets/$target/${prefix}${target/\//-}.bom.cdx.json"
+    [ "$bld_ver_to" = 'SNAPSHOT' ] || prefix="${prefix}${bld_ver_to}-"
+    [[ "$bld_ver_to" =~ .*-SNAPSHOT ]] && prefix="$(echo "$prefix" | awk '{print tolower($1)}')${bld_num_to}-"
+    local url_bom="$url_downloads/$rel_dir/targets/$dev_target/${prefix}${dev_target/\//-}.bom.cdx.json"
 
-    local msg="$ERROR Could not access BOM for $version_to, kernel version cannot be determined"
+    local msg="$ERROR Could not access BOM for $bld_ver_to, kernel version cannot be determined"
     download "$url_bom" "$pkg_bom_json" "$msg"
+}
+
+dl_failures() {
+    # The failures html resides in odd, one-man-out URL locations:
+    #     https://downloads.openwrt.org/snapshots/faillogs/mipsel_24kc/packages/
+    #     https://downloads.openwrt.org/releases/faillogs-23.05/mipsel_24kc/packages/
+    #
+    # Sets global 'url_failure'
+
+    if [ "$bld_ver_to" = 'SNAPSHOT' ]; then
+        location='snapshots/faillogs'
+    else
+        location="releases/faillogs-${rel_branch}"
+    fi
+    url_failure="$url_downloads/$location/$dev_arch/packages/"
+
+    local msg="No package build failures found for $bld_ver_to $dev_arch"
+    download "$url_failure" "$pkg_fail_html" "$msg"
 }
 
 #-------------------------------------------------------------------------------
@@ -208,7 +233,7 @@ get_defaults() {
     # We grab package arch from the json, not the machine, because we may
     # expand this someday to use for cross device checking (say, to check
     # updates for your Archer from your x86).
-    eval "$(jsonfilter -i $pkg_platform_json -e 'package_arch=$.arch_packages')"
+    eval "$(jsonfilter -i $pkg_platform_json -e 'dev_arch=$.arch_packages')"
 
     {
         echo 'kernel'
@@ -279,36 +304,36 @@ show_config() {
     # Collect information about the actual installation, current and target images.
     #
     # If needed, profiles.json resides at:
-    #   "$url_downloads/$ver_dir/targets/$target/profiles.json"
+    #   "$url_downloads/$rel_dir/targets/$dev_target/profiles.json"
     # but I believe everything we need is already in platform.json
 
     # Use the platform data for most target image data.
-    local build_at img_prefix build_to img_file
+    local img_prefix img_file
     eval "$(jsonfilter -i $pkg_platform_json \
-        -e 'build_at=$.build_at'\
-        -e 'build_to=$.version_code' \
+        -e 'bld_date=$.build_at'\
+        -e 'bld_num_to=$.version_code' \
         -e 'img_prefix=$.image_prefix'\
-        -e "img_file=$.images[@['type']='${sutype}' && @['filesystem']='${fstype}'].name")"
+        -e "img_file=\$.images[@['type']='${dev_sutype}' && @['filesystem']='${dev_fstype}'].name")"
 
     # Use the platform BOM as it appears to be the only file containing
     # the target kernel version.
     if ! dl_bom; then
-        kver_to="unknown"
+        bld_kver_to="unknown"
     else
-        kver_to=$(jsonfilter -i $pkg_bom_json -e '$[*][@.name = "kernel"].version')
+        bld_kver_to=$(jsonfilter -i $pkg_bom_json -e '$[*][@.name = "kernel"].version')
     fi
 
     log 1 << INFO
-        Board-name    $platform
-        Target        $target
-        Package-arch  $package_arch
-        Version-from  $version_from $build_from (kernel $kver_from)
-        Version-to    $version_to $build_to (kernel $kver_to)
+        Board-name    $dev_platform
+        Target        $dev_target
+        Package-arch  $dev_arch
+        Version-from  $bld_ver_from $bld_num_from (kernel $bld_kver_from)
+        Version-to    $bld_ver_to $bld_num_to (kernel $bld_kver_to)
         Image-prefix  $img_prefix
-        Root-FS-type  $fstype
-        Sys-type      $sutype
+        Root-FS-type  $dev_fstype
+        Sys-type      $dev_sutype
         Image-file    $img_file
-        Build-at      $build_at
+        Build-at      $bld_date
 
 INFO
 }
@@ -319,7 +344,7 @@ show_versions() {
 
     dl_overview
 
-    # shellcheck disable=SC2034 # 'latest' and 'branches' are unused, but may be someday.
+    # shellcheck disable=SC2034  # 'latest' and 'branches' are unused, but may be someday.
     local latest branches versions
     eval "$(jsonfilter -i $pkg_overview_json \
             -e 'latest=$.latest.*' \
@@ -330,7 +355,7 @@ show_versions() {
     {
         local found=false
         for rel in $versions; do
-            if [ "$version_to" = "$rel" ]; then
+            if [ "$bld_ver_to" = "$rel" ]; then
                 printf '- %s     <<-- your version-to is correct\n' "$rel"
                 found=true
             else
@@ -340,7 +365,7 @@ show_versions() {
         if $found; then
             printf 'It is likely that the ASU server is having issues.'
         else
-            printf "Your selected version-to '%s' is invalid." "$(colorize "$version_to")"
+            printf "Your selected version-to '%s' is invalid." "$(colorize "$bld_ver_to")"
         fi
     } | sort
 }
@@ -408,8 +433,8 @@ is_installed() {
 in_packages() {
     # Search for a given package in both the platform and arch package lists.
     local pkg="$1"
-    [ -n "$(jsonfilter -i $pkg_pkg_platform_json -e "$.packages['${pkg}']")" ] && return 0
-    [ -n "$(jsonfilter -i $pkg_pkg_arch_json -e "$['${pkg}']")" ] && return 0
+    [ -n "$(jsonfilter -i $pkg_pkg_platform_json -e "\$.packages['${pkg}']")" ] && return 0
+    [ -n "$(jsonfilter -i $pkg_pkg_arch_json     -e "\$['${pkg}']")"          ] && return 0
     local alias=$(provides_what "$pkg")
     [ -n "$alias" ] && [ "$alias" != "$pkg" ] && in_packages "$alias" && return 0
     return 1
@@ -431,6 +456,8 @@ check_defaults() {
         if ! is_installed "$pkg"; then
             local alias=$(what_provides "$pkg")
             if [ -z "$alias" ] || ! is_installed "$alias"; then
+                # TODO check if it 'whatconflicts' with something that /is/ installed
+                # e.g, libustream-mbedtls replaced by libustring-openssl
                 printf 'Warning: %-*s - default package is not present\n' "$widest" "$pkg"
                 if $inc_missing; then
                     printf '%s#missing\n' "$pkg" >> "$pkg_user"
@@ -449,9 +476,9 @@ check_replacements() {
     # Note that the current overview and branches.json files are broken,
     # with 'libustream-wolfssl' appearing twice in 'package_changes'.
 
-    printf 'Installed packages replaced in %s:\n' "$version_to"
+    printf 'Installed packages replaced in %s:\n' "$bld_ver_to"
 
-    local changes="$.branches['$branch'].package_changes"
+    local changes="$.branches['$rel_branch'].package_changes"
     local sources=$(jsonfilter -i $pkg_overview_json -e "${changes}[*].source" | sort -u)
 
     # Testing:
@@ -462,7 +489,7 @@ check_replacements() {
     for from in $sources; do
         if grep -q "^${from}\b" "$pkg_user"; then
             local to=$(jsonfilter -l1 -i $pkg_overview_json \
-                -e "${changes}"'[@.source = "'${from}'"]'".target")
+                -e "${changes}[@.source = '${from}'].target")
             printf '  %s -> %s\n' "$(colorize "$from")" "$to"
             changed=true
         fi
@@ -483,7 +510,7 @@ check_non_existent() {
         return
     fi
 
-    printf 'Installed packages not available in %s:\n' "$version_to"
+    printf 'Installed packages not available in %s:\n' "$bld_ver_to"
 
     #echo 'ima-fake-package' >> $pkg_user  # Testing
     local pkgs=$(awk -F'#|\t' '{printf "%s ", $1} END {printf "\n"}' "$pkg_user")
@@ -503,30 +530,19 @@ check_non_existent() {
 check_failures() {
     # Crude attempt at finding any build issues with the packages.  Scrapes
     # the html from the downloads status page.
-    #
-    # They reside in odd, one-man-out URL locations:
-    #     https://downloads.openwrt.org/snapshots/faillogs/mipsel_24kc/packages/
-    #     https://downloads.openwrt.org/releases/faillogs-23.05/mipsel_24kc/packages/
 
-    # Testing!  Pick a package that's currently not building
-    #p=cloudflared ; echo $p >> $pkg_installed ; echo $p >> $pkg_user
+    if dl_failures; then
+        printf 'There are currently package build failures for %s %s:\n' "$bld_ver_to" "$dev_arch"
 
-    if [ "$version_to" = 'SNAPSHOT' ]; then
-        location='snapshots/faillogs'
-    else
-        location="releases/faillogs-${branch}"
-    fi
-    local url_failure="$url_downloads/$location/$package_arch/packages/"
-
-    local msg="No package build failures found for $version_to $package_arch"
-    if download "$url_failure" "$pkg_fail_html" "$msg"; then
-        printf 'There are currently package build failures for %s %s:\n' "$version_to" "$package_arch"
+        # Testing!  Pick a package that's currently not building
+        #p=cloudflared ; echo $p >> $pkg_installed ; echo $p >> $pkg_user
 
         # Scraping the html is a total hack.
         # Let me know if you have an API on downloads that can give this info.
         local bad_ones=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < $pkg_fail_html)
 
-        local widest=$(echo "$bad_ones" | tr ' ' '\n' | wc -L)
+        # shellcheck disable=SC2086  # Because we want to expand bad_ones.
+        local widest=$(printf "%s\n" $bad_ones | wc -L)
         local found=false
         for bad in $bad_ones; do
             if grep -q "\b$bad\b" $pkg_installed; then
@@ -570,7 +586,7 @@ Compile a report of all user-installed packages into '$pkg_user'.
     exit 1
 }
 
-while [ "$1" ]; do
+while [ "${1:-}" ]; do
     case "$1" in
         -a|--all     ) list_all=true ;;
         -d|--defaults) inc_defaults=true ;;
@@ -591,7 +607,7 @@ while [ "$1" ]; do
         ;;
         -V|--version-to)
             shift
-            version_to=$(echo "$1" | awk '{print toupper($1)}')
+            bld_ver_to=$(echo "$1" | awk '{print toupper($1)}')
         ;;
         *)
             usage
@@ -604,9 +620,10 @@ done
 
 rm -f "$pkg_user"
 
-collect_config "$version_to"
+collect_config "$bld_ver_to"
 
 dl_board
+
 get_defaults
 show_config
 get_dependencies
