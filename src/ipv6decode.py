@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # vim: set expandtab softtabstop=4 shiftwidth=4:
-# Copyright (C) 2022 Eric Fahlgren
-# Released under GPL2.0  https://opensource.org/licenses/gpl-2.0.php
+# Copyright (C) 2022-2024 Eric Fahlgren
+# SPDX-License-Identifier: GPL-2.0
 #-------------------------------------------------------------------------------
 
 import os
@@ -9,7 +9,7 @@ import json
 import ipaddress
 from   collections import namedtuple
 from   mac2mfg     import mac2mfg
-from   whois       import whois_from_cache, WhoIs
+from   whois       import whois_from_cache, WhoIs, whois_cache_keys
 
 install_dir = os.path.dirname(os.path.realpath(__file__))  # Chase through any symbolic link from cgi-bin.
 
@@ -27,6 +27,7 @@ def parse_args():
     # https://www.compart.com/en/unicode/search?q=zero#characters
     parser.add_argument(      '--zero',     default=zero,                         action='store',      help='Characters to use for 4x zero sequence.  Default: %(default)r (Gurmukhi Digit Zero).')
     parser.add_argument(      '--exploded', default=False,                        action='store_true', help='Map the address blocks to binary bit fields.')
+    parser.add_argument(      '--refresh',  default=False,                        action='store_true', help='Reload the whois cache using fresh lookups.')
     parser.add_argument(      '--testing',  default=False,                        action='store_true', help='Use canned addresses to show stuff and quit.')
     parser.add_argument(      '--list',     default=False,                        action='store_true', help='List internal allocation table and quit.')
     parser.add_argument(                    default=list(),     dest='addresses', nargs='*',           help='All the IP addresses.')
@@ -114,7 +115,7 @@ def add_org(address):
     """
     debug = False
     if debug: print('lookup', address)
-    whois = whois_from_cache(address)
+    whois = whois_from_cache(address, args.refresh)
     if whois:
         root_cidr = whois.cidr
         if block := in_allocations(root_cidr):
@@ -127,7 +128,7 @@ def add_org(address):
             add_new_allocation(root_cidr, desc)
 
         parent = whois.parent
-        if debug: print('   parent', parent)
+        if debug: print('    parent', parent)
         if parent:
             if not parent.startswith('NET'):
                 try:
@@ -233,6 +234,11 @@ GUA:=B('2000::/3',         'Global Unicast (GUA)'),
 #   B('2001:0200::/23',    'APNIC',                                     '',                  '1999-07-01'),
 #   B('2001:0400::/23',    'ARIN',                                      '',                  '1999-07-01'),
 #   B('2001:0600::/23',    'RIPE NCC',                                  '',                  '1999-07-01'),
+
+    # These give a 404 from all the RDAP databases, but Ubuntu 'whois' shows them...
+    B('2001:600::/23',     'EU-ZZ-2001-0600: ORG-NCC1-RIPE'),
+    B('2001:7f8::/29',     'EU-ZZ-2001-07F8: ORG-NCC1-RIPE'),
+
 #   B('2001:0800::/22',    'RIPE NCC',                                  '',                  '2002-11-02'),
 #   B('2001:0c00::/23',    'APNIC',                                     '',                  '2002-05-02'),
 #   B('2001:0e00::/23',    'APNIC',                                     '',                  '2003-01-01'),
@@ -259,7 +265,7 @@ GUA:=B('2000::/3',         'Global Unicast (GUA)'),
 #   B('2610:0000::/23',    'ARIN',                                      '',                  '2005-11-17'),
 #   B('2620:0000::/23',    'ARIN',                                      '',                  '2006-09-12'),
 #   B('2630:0000::/12',    'ARIN',                                      '',                  '2019-11-06'),
-    B('2800:0000::/12',    'LACNIC',                                    '',                  '2006-10-03'),
+#   B('2800:0000::/12',    'LACNIC',                                    '',                  '2006-10-03'),
 #   B('2a00:0000::/11',    'RIPE NCC',                                  '',                  '2006-10-03 see /12 -> /11'),
 #   B('2a10:0000::/12',    'RIPE NCC',                                  '',                  '2019-06-05'),
 #   B('2c00:0000::/12',    'AFRINIC',                                   '',                  '2006-10-03'),
@@ -285,7 +291,7 @@ GUA:=B('2000::/3',         'Global Unicast (GUA)'),
 
     B('2002::/16',         '6to4',                                      'RFC3056',          '2001-02',   '',          True,   True,        True,        None,      False),
 
-    B('2620:4f:8000::/48', 'Direct Delegation AS112 Service',           'RFC7534',          '2011-05',   '',          True,   True,        True,        True,      False),
+    B('2620:4f:8000::/48', 'Direct Delegation ASN 112 Service',         'RFC7534',          '2011-05',   '',          True,   True,        True,        True,      False),
 
     # Some more reserved blocks in the global space
     B('2d00:0000::/8',     'IANA Reserved',                             '',                  '1999-07-01'),
@@ -386,8 +392,13 @@ if __name__ == '__main__':
     short_addresses = args.format == 'short'
 
     if args.list:
+        keys = whois_cache_keys()
+        for key in keys:
+            if ':' in key or 'NET' in key:
+                add_org(key)
         dump(short_addresses)
 
+    add_org('2a00::/11')  # Because it has a known-long description.
     wa = (max(len(a) for a in args.addresses) if short_addresses else 39) + 5
     w2 = max(len(a.name) for a in allocations) + 8 # 8 is for depth fudging.
 

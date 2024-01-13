@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Copyright (C) 2022 Eric Fahlgren
+Copyright (C) 2022-2024 Eric Fahlgren
+SPDX-License-Identifier: GPL-2.0
 
 Look up the manufacturer of MAC addresses.  Does not care about character
 case, and allows either dashes or colons as separators.
@@ -23,6 +24,11 @@ to update the 'manuf' file.  If the entries remain undefined, you can add
 them to the 'manuf.tmpl' file and regenerate.  Note that some devices (Android
 and newer iOS phones) generate random MAC addresses to avoid fingerprinting,
 so they will always appear to as devices from an unknown manufacturer.
+
+2023-09-08 - Use the 'make-manuf2.py' script to update 'manuf_oui24.py', as
+we no longer read and parse the 'manuf' file, but rather create a python
+version of the data.
+
 """
 #-------------------------------------------------------------------------------
 
@@ -57,13 +63,13 @@ def read_manuf_file():
                 mac_table[mac.lower().replace(':', '')] = mfg
     return mac_table
 
-_mac2mfg = read_manuf_file()
+from manuf_oui24 import manuf_oui24_table
 
 def mac2mfg(mac):
     """ See RFC 7844 for MAC Address Randomization. """
     prefix = mac.lower().replace('-', '').replace(':', '')[:6]
     default = '[randomized MAC]' if prefix[1] in '26ae' else '[unknown mfg]'
-    return prefix, _mac2mfg.get(prefix, default)
+    return prefix, manuf_oui24_table.get(prefix, ['', default])[1]
 
 if __name__ == '__main__':
     import sys

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # vim: set expandtab softtabstop=4 shiftwidth=4:
+# Copyright (C) 2023-2024 Eric Fahlgren
+# SPDX-License-Identifier: GPL-2.0
 #-------------------------------------------------------------------------------
 """
 Python implementation of the well-known 'whois' function, using availabel RIR
@@ -96,7 +98,10 @@ class WhoIs:
             self.from_ref(ref)
             if handle == self.parent:
                 # Happens for Linode: 2600:3c03::f03c:92ff:fe41:3428/64
-                self.parent = js['net']['parentNetRef']['@handle']
+                try:
+                    self.parent = js['net']['parentNetRef']['@handle']
+                except KeyError:
+                    self.parent = None
 
     def from_ip(self, ip_or_subnet):
         """ Use the provided ip to search the various RDAP entries. """
@@ -144,6 +149,7 @@ class WhoIs:
 
             Reference:
             https://www.arin.net/resources/registry/whois/rws/api/
+            Note that the /asn/ RWS might be of interest.
         """
 
         url = f'https://whois.arin.net/rest/net/{handle}.json'
@@ -275,7 +281,7 @@ def _load_cache():
     if _cache is None:
         _cache = WhoIsCache()  # TODO make WhoIsCache a singleton
 
-def whois_from_cache(address, reload=False):
+def whois_from_cache(address, refresh=False):
     _load_cache()
 
     if address == '::/0':
@@ -283,12 +289,16 @@ def whois_from_cache(address, reload=False):
         return
 
     whois = _cache.get(address)
-    if not whois or reload:
-        print(f'Updating cache {address}...')
+    if not whois or refresh:
+        # print(f'Updating cache {address}...')
         whois = WhoIs(address)
         _cache.add(address, whois)
         _cache.write()
     return whois
+
+def whois_cache_keys():
+    _load_cache()
+    return sorted(_cache)
 
 #-------------------------------------------------------------------------------
 
@@ -319,11 +329,20 @@ if __name__ == '__main__':
     )
 
     def parse_args():
-        from argparse import ArgumentParser
+        from argparse import ArgumentParser, RawDescriptionHelpFormatter as Formatter
 
-        parser = ArgumentParser()
+        parser = ArgumentParser(
+            formatter_class=Formatter,
+            add_help=True,
+            epilog='''
+                Examples:
+                    whois 8.8.8.8 NET-8-0-0-0-1
+                    whois NET6-2601-1
+                    whois 2001:600::/24
+            '''.replace('                ', ''),
+        )
         parser.add_argument('-v', '--verbose', default=False,  action='store_true',         help='Print a bunch of extra debugging data.')
-        parser.add_argument('-r', '--reload',  default=False,  action='store_true',         help='Reload the cache using a fresh lookup.')
+        parser.add_argument('-r', '--refresh', default=False,  action='store_true',         help='Reload the cache using a fresh lookup.')
         parser.add_argument('-d', '--dump',    default=False,  action='store_true',         help='Dump the cache and quit.')
         parser.add_argument('-t', '--test',    default=False,  action='store_true',         help='Set an option state.')
         parser.add_argument(                   default=list(), dest='addresses', nargs='*', help='List IP addresses, subnets and handles.')
@@ -333,15 +352,15 @@ if __name__ == '__main__':
             return args
 
         parser.print_help()
-        raise SystemExit
+        parser.exit()
 
     args = parse_args()
 
     if args.dump:
-        _load_cache()
-        key_len = max(len(k) for k in _cache)
-        for key in sorted(_cache):
-            whois = whois_from_cache(key, args.reload)
+        keys = whois_cache_keys()
+        key_len = max(len(k) for k in keys)
+        for key in keys:
+            whois = whois_from_cache(key, args.refresh)
             print(f'{key:<{key_len}} - {whois}')
         raise SystemExit
 
@@ -350,7 +369,7 @@ if __name__ == '__main__':
 
     for ip in args.addresses:
         print(f'Results for {ip!r}:')
-        whois = whois_from_cache(ip, args.reload)
+        whois = whois_from_cache(ip, args.refresh)
         if not whois:
             print(f'        Error: {whois.error}')
         else:
