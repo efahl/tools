@@ -59,9 +59,11 @@ log_error() {
 }
 
 colorize() {
-    printf '\033[31m%s\033[m' "$@"
+    local color="${2:-255;0;0}"  # Default is red.
+    printf '\033[38;2;%sm%s\033[m' "$color" "$1"
 }
 ERROR="$(colorize 'ERROR:')"
+WARN="$(colorize 'Warning:' '255;255;0')"
 
 log() {
     # Write to stdout if message verbosity <= system verbosity.
@@ -318,7 +320,7 @@ show_config() {
     # Use the platform BOM as it appears to be the only file containing
     # the target kernel version.
     if ! dl_bom; then
-        bld_kver_to="unknown"
+        bld_kver_to="$(colorize 'unknown' '255;255;0')"
     else
         bld_kver_to=$(jsonfilter -i $pkg_bom_json -e '$[*][@.name = "kernel"].version')
     fi
@@ -451,22 +453,27 @@ check_defaults() {
     # in the "user installed" package list.  If you have manually removed them,
     # then '-m" will undo those removals.
 
+    printf 'Default package analysis:\n'
     local widest=$(wc -L < $pkg_defaults)
+    local issues=false
     while read -r pkg; do
         if ! is_installed "$pkg"; then
             local alias=$(what_provides "$pkg")
             if [ -z "$alias" ] || ! is_installed "$alias"; then
                 # TODO check if it 'whatconflicts' with something that /is/ installed
                 # e.g, libustream-mbedtls replaced by libustring-openssl
-                printf 'Warning: %-*s - default package is not present\n' "$widest" "$pkg"
+                issues=true
+                printf "  %-*s - $WARN default package is not present\n" "$widest" "$pkg"
                 if $inc_missing; then
                     printf '%s#missing\n' "$pkg" >> "$pkg_user"
                 fi
             else
-                printf 'Default: %-*s - replaced/provided by %s\n' "$widest" "$pkg" "$alias"
+                issues=true
+                printf '  %-*s - default package replaced/provided by %s\n' "$widest" "$pkg" "$alias"
             fi
         fi
     done < $pkg_defaults
+    $issues || printf '  No missing or modified default packages.\n'
 }
 
 check_replacements() {
@@ -638,7 +645,7 @@ if $check_failed; then
     log 1 ''
 fi
 
-content=$(sort "$pkg_user") && echo "$content" > "$pkg_user"
+content=$(sort "$pkg_user") && echo "$content" > "$pkg_user" && unset -v content
 
 dl_overview
 log 1 "$(check_replacements)"
