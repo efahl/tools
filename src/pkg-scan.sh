@@ -5,7 +5,12 @@
 # shellcheck disable=SC2039,SC2155  # "local" not defined in POSIX sh
 #-------------------------------------------------------------------------------
 
-set -u  # Make all undefined refs into errors.
+set -o nounset  # Make all undefined refs into errors.
+
+# By default, we now grab board and version data from downloads and FS, not
+# sysupgrade server. The issue with FS is that the data is not stored in a
+# versioned, stable API, but rather in a site-specific js file.
+use_asu=false
 
 # User options, see 'usage'.
 list_all=false
@@ -18,8 +23,10 @@ verbosity=0
 
 # Global variables
 url_sysupgrade=$(uci get attendedsysupgrade.server.url || echo 'https://sysupgrade.openwrt.org')  # sysupgrade server base url
+url_firmware='https://firmware-selector.openwrt.org'
 url_downloads='https://downloads.openwrt.org'         # This should be in config, too.
 url_overview="$url_sysupgrade/json/v1/overview.json"  # Static
+url_config="$url_firmware/config.js"                  # Our source for available versions.
 url_failure=''                                        # Composed in dl_failures
 
 # Files used.
@@ -32,6 +39,7 @@ pkg_fail_html="${tmp_loc}failures.html"
 
 pkg_bom_json="${tmp_loc}bom.json"
 pkg_overview_json="${tmp_loc}overview.json"
+pkg_config_js="${tmp_loc}config.js"
 pkg_pkg_arch_json="${tmp_loc}packages-arch.json"
 pkg_pkg_platform_json="${tmp_loc}packages-plat.json"
 pkg_platform_json="${tmp_loc}platform.json"
@@ -84,7 +92,7 @@ dev_arch=''       # "x86_64" or "mipsel_24kc"   or "aarch64_cortex-a53", contain
 dev_target=''     # "x86/64" or "ath79/generic" or "mediatek/mt7622", from board file
 dev_platform=''   # "generic" (for x86) or "tplink,archer-c7-v4" or "linksys,e8450-ubi"
 dev_fstype=''     # "ext4" or "squashfs"
-dev_sutype=''     # Sysupgrade type, combined-efi or sysupgrade
+dev_sutype=''     # Sysupgrade type: combined, combined-efi, sdcard or sysupgrade
 
 bld_ver_from=''   # Full version name currently installed: "SNAPSHOT" or "22.03.1"
 bld_kver_from=''  # Kernel version that is currently running
@@ -130,6 +138,14 @@ collect_config() {
         rel_dir="releases/$bld_ver_to"
         rel_branch="${bld_ver_to%.**}"
     fi
+
+#   if false; then
+#       # An oddball test case, with 'sdcard' sutype.
+#       dev_platform='compulab_trimslice'
+#       dev_target='tegra/generic'
+#       dev_fstype='squashfs'
+#       dev_sutype='sysupgrade'
+#   fi
 }
 
 #-------------------------------------------------------------------------------
@@ -139,7 +155,7 @@ download() {
     local dst_file="$2"
     local msg="${3:-$ERROR Could not access $url (server down?)}"
 
-    rm -f "$dst_file"
+    rm -f "${dst_file:?}"
     log 2 "Fetching $url to $dst_file"
     if ! wget -q -O "$dst_file" "$url"; then
         log_error "$msg"
@@ -149,9 +165,15 @@ download() {
 }
 
 dl_board() {
-    # Get the starting point for the target build.
-    local url_platform="$url_sysupgrade/json/v1/$rel_dir/targets/$dev_target/$dev_platform.json"
+    # Get the starting point for the target build.  Downloads is a superset of
+    # the file on sysupgrade server.
+    if $use_asu; then
+        local url_platform="$url_sysupgrade/json/v1/$rel_dir/targets/$dev_target/$dev_platform.json"
+    else
+        local url_platform="$url_downloads/$rel_dir/targets/$dev_target/profiles.json"
+    fi
     local msg="$ERROR Could not download platform json.  Checking that version-to is correct."
+
     if ! download "$url_platform" "$pkg_platform_json" "$msg" || [ ! -e "$pkg_platform_json" ]; then
         show_versions | log_error
         exit 1
@@ -160,7 +182,7 @@ dl_board() {
 
 dl_packages() {
     # Download the two package lists, they are
-    #  1) Generic arch package list, contaning most of the items:
+    #  1) Generic arch package list, containing most of the items:
     #     https://sysupgrade.openwrt.org/json/v1/snapshots/packages/x86_64-index.json    
     #     Contains "vim" and "auc" and "dnsmasq-full"...
     #
@@ -186,6 +208,15 @@ dl_overview() {
     # Uses global 'url_overview'
 
     if ! download "$url_overview" "$pkg_overview_json"; then
+        exit 1
+    fi
+}
+
+dl_config() {
+    # Grab the js from the firmware selector containing its list of available
+    # build versions.
+
+    if ! download "$url_config" "$pkg_config_js"; then
         exit 1
     fi
 }
@@ -280,16 +311,16 @@ get_installed() {
 }
 
 get_user_packages() {
+    # Filter out all the non-top-level packages, and optionally remove all
+    # the defaults at the same time.
+
     local pkg
-    local examined=0
     while read -r pkg; do
-        examined=$((examined + 1))
-    #   log 3 $(printf '%5d - %-40s\r' "$examined" "$pkg")  # except log does newline...
         local deps=$(what_depends "$pkg")
         local suffix=''
         if is_default "$pkg"; then
             if ! $inc_defaults; then
-                log 2 "Skipping default package: $pkg"
+                echo "Skipping default package: $pkg" | log 2
                 continue
             fi
             suffix="#default"
@@ -299,7 +330,6 @@ get_user_packages() {
             printf '%s%s\t%s\n' "$pkg" "$suffix" "$deps" | sed 's/\s*$//' >> "$pkg_user"
         fi
     done < $pkg_installed
-    echo $examined
 }
 
 show_config() {
@@ -309,13 +339,26 @@ show_config() {
     #   "$url_downloads/$rel_dir/targets/$dev_target/profiles.json"
     # but I believe everything we need is already in platform.json
 
+    if [ "$dev_sutype" = 'sysupgrade' ]; then
+        # Might still be wrong, so find 'sdcard' vs 'sysupgrade'...
+        jsonfilter -i $pkg_platform_json -e '$.profiles[*].images[*].type' \
+            | grep -q 'sdcard' \
+            && dev_sutype='sdcard'
+    fi
+
+    eval "$(jsonfilter -i $pkg_platform_json -e 'bld_date=$.build_at' -e 'bld_num_to=$.version_code')"
+
     # Use the platform data for most target image data.
     local img_prefix img_file
-    eval "$(jsonfilter -i $pkg_platform_json \
-        -e 'bld_date=$.build_at'\
-        -e 'bld_num_to=$.version_code' \
-        -e 'img_prefix=$.image_prefix'\
-        -e "img_file=\$.images[@['type']='${dev_sutype}' && @['filesystem']='${dev_fstype}'].name")"
+    if $use_asu; then
+        eval "$(jsonfilter -i $pkg_platform_json \
+            -e 'img_prefix=$.image_prefix' \
+            -e "img_file=\$.images[@.type='${dev_sutype}' && @.filesystem='${dev_fstype}'].name")"
+    else
+        eval "$(jsonfilter -i $pkg_platform_json \
+            -e "img_prefix=\$.profiles['${dev_platform}'].image_prefix" \
+            -e "img_file=\$.profiles['${dev_platform}'].images[@.type='${dev_sutype}' && @.filesystem='${dev_fstype}'].name")"
+    fi
 
     # Use the platform BOM as it appears to be the only file containing
     # the target kernel version.
@@ -343,15 +386,29 @@ INFO
 show_versions() {
     # Grab the ASU overview to get all the available versions, scan that
     # for version-to and report.
+    #
+    # Note that the firmware selector has a much more liberal notion of
+    # available versions:
+    #   conf_url='https://firmware-selector.openwrt.org/config.js'
+    #   ucode -p "$(curl -s $conf_url | sed 's/^var //'); sort(keys(config.versions))"
+    # or
+    #   eval $(ucode -p "$(curl -s $conf_url | sed 's/^var //')" | jsonfilter -e 'versions=$.versions')
 
-    dl_overview
+    if ! $use_asu; then
+        dl_config
+        eval "$(ucode -p "$(sed 's/^var //' $pkg_config_js)" | jsonfilter -e 'versions=$.versions')"
+    else
+        # Old way, but sysupgrade list is very short and has none of the older
+        # builds which might still be of interest.
+        dl_overview
 
-    # shellcheck disable=SC2034  # 'latest' and 'branches' are unused, but may be someday.
-    local latest branches versions
-    eval "$(jsonfilter -i $pkg_overview_json \
-            -e 'latest=$.latest.*' \
-            -e 'branches=$.branches' \
-            -e 'versions=$.branches[*].versions.*')"
+        # shellcheck disable=SC2034  # 'latest' and 'branches' are unused, but may be someday.
+        local latest branches versions
+        eval "$(jsonfilter -i $pkg_overview_json \
+                -e 'latest=$.latest.*' \
+                -e 'branches=$.branches' \
+                -e 'versions=$.branches[*].versions.*')"
+    fi
 
     printf '\nValid version-to values from %s:\n' "$url_overview"
     {
@@ -437,6 +494,7 @@ in_packages() {
     local pkg="$1"
     [ -n "$(jsonfilter -i $pkg_pkg_platform_json -e "\$.packages['${pkg}']")" ] && return 0
     [ -n "$(jsonfilter -i $pkg_pkg_arch_json     -e "\$['${pkg}']")"          ] && return 0
+    # BUG alias can be a list of packages, e.g., libncurses
     local alias=$(provides_what "$pkg")
     [ -n "$alias" ] && [ "$alias" != "$pkg" ] && in_packages "$alias" && return 0
     return 1
@@ -593,6 +651,8 @@ Compile a report of all user-installed packages into '$pkg_user'.
     exit 1
 }
 
+__check=false
+__list=false
 while [ "${1:-}" ]; do
     case "$1" in
         -a|--all     ) list_all=true ;;
@@ -600,13 +660,17 @@ while [ "${1:-}" ]; do
         -m|--missing ) inc_missing=true ;;
         -k|--keep    ) keep=true ;;
         -v|--verbose ) verbosity=$((verbosity + 1)) ;;
-        -l|--list    ) list_pkgs=true ;;
         -f|--failed  ) check_failed=true ;;
         -o|--output  )
             pkg_user=$2
             shift
         ;;
+        -l|--list    )
+            __list=true
+            list_pkgs=true
+        ;;
         -c|--check   )
+            __check=true
             inc_defaults=true
             inc_missing=true
             check_failed=true
@@ -623,9 +687,14 @@ while [ "${1:-}" ]; do
     shift
 done
 
+if $__check && $__list; then
+    echo "The '-c/--check' and '-l/--list' options are mutually exclusive, pick one or the other."
+    exit 1
+fi
+
 #-------------------------------------------------------------------------------
 
-rm -f "$pkg_user"
+rm -f "${pkg_user:?}"
 
 collect_config "$bld_ver_to"
 
@@ -635,7 +704,7 @@ get_defaults
 show_config
 get_dependencies
 get_installed
-examined=$(get_user_packages)
+get_user_packages
 
 log 1 "$(check_defaults)"
 log 1 ''
@@ -655,19 +724,22 @@ log 1 ''
 # fully populated, so it comes last.
 dl_packages
 log 1 "$(check_non_existent)"
-log 1 ''
 
-if $keep; then
+examined="$(wc -l < "$pkg_installed")"
+n_logged="$(wc -l < "$pkg_user")"
+
+if ! $keep; then
+    rm -f ${tmp_loc:?}*
+else
+    log 1 ''
     log 1 'Keeping working files:'
     log 1 "$(ls -lh ${tmp_loc}*)"
-else
-    rm -f ${tmp_loc}*
 fi
 
-n_logged=$(wc -l < "$pkg_user")
-printf 'Done, logged %d of %d entries in %s\n' "$n_logged" "$examined" "$pkg_user" | log 1
-
-if $list_pkgs; then
+if ! $list_pkgs; then
+    rm -f "${pkg_user:?}"
+else
+    printf 'Done, logged %d of %d entries in %s\n' "$n_logged" "$examined" "$pkg_user" | log 1
     log 1 ''
     awk -F'#|\t' '{printf "%s ", $1} END {printf "\n"}' "$pkg_user"
 fi
