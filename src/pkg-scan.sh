@@ -229,7 +229,7 @@ dl_bom() {
     [[ "$bld_ver_to" =~ .*-SNAPSHOT ]] && prefix="$(echo "$prefix" | awk '{print tolower($1)}')${bld_num_to}-"
     local url_bom="$url_downloads/$rel_dir/targets/$dev_target/${prefix}${dev_target/\//-}.bom.cdx.json"
 
-    local msg="$ERROR Could not access BOM for $bld_ver_to, kernel version cannot be determined"
+    local msg="$WARN Could not access BOM for $bld_ver_to, kernel version cannot be determined"
     download "$url_bom" "$pkg_bom_json" "$msg"
 }
 
@@ -341,7 +341,7 @@ show_config() {
 
     if [ "$dev_sutype" = 'sysupgrade' ]; then
         # Might still be wrong, so find 'sdcard' vs 'sysupgrade'...
-        jsonfilter -i $pkg_platform_json -e '$.profiles[*].images[*].type' \
+        jsonfilter -i $pkg_platform_json -e "\$.profiles['${dev_platform}'].images[*].type" \
             | grep -q 'sdcard' \
             && dev_sutype='sdcard'
     fi
@@ -567,11 +567,11 @@ check_non_existent() {
     # TODO optionally remove missing packages from the user list.
 
     if [ ! -e "$pkg_pkg_platform_json" ]; then
-        log_error "$ERROR Cannot verify platform packages due to missing json."
+        log_error "$WARN Cannot verify platform packages due to missing json."
         return
     fi
     if [ ! -e "$pkg_pkg_arch_json" ]; then
-        log_error "$ERROR Cannot verify architecture packages due to missing json."
+        log_error "$WARN Cannot verify architecture packages due to missing json."
         return
     fi
 
@@ -650,6 +650,9 @@ Compile a report of all user-installed packages into '$pkg_user'.
 
     exit 1
 }
+
+# Default to check if nothing specified.
+[ "$#" -eq 0 ] && set -- "--check"
 
 __check=false
 __list=false
