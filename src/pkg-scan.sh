@@ -22,7 +22,7 @@ keep=false
 verbosity=0
 
 # Global variables
-url_sysupgrade=$(uci get attendedsysupgrade.server.url || echo 'https://sysupgrade.openwrt.org')  # sysupgrade server base url
+url_sysupgrade=$(uci -q get attendedsysupgrade.server.url || echo 'https://sysupgrade.openwrt.org')  # sysupgrade server base url
 url_firmware='https://firmware-selector.openwrt.org'
 url_downloads='https://downloads.openwrt.org'         # This should be in config, too.
 url_overview="$url_sysupgrade/json/v1/overview.json"  # Static
