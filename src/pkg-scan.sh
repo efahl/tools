@@ -272,7 +272,7 @@ get_defaults() {
         echo 'kernel'
         jsonfilter -i $pkg_platform_json \
             -e '$.default_packages.*' \
-            -e '$.device_packages.*'
+            -e "\$.profiles['${dev_platform}'].device_packages.*"
     } | sort -u > $pkg_defaults
 }
 
@@ -422,7 +422,7 @@ show_versions() {
             fi
         done
         if $found; then
-            printf 'It is likely that the ASU server is having issues.'
+            printf 'Either the ASU server is having issues, or your specified version is no longer supported.'
         else
             printf "Your selected version-to '%s' is invalid." "$(colorize "$bld_ver_to")"
         fi
