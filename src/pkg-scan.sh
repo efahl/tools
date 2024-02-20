@@ -346,18 +346,21 @@ show_config() {
             && dev_sutype='sdcard'
     fi
 
-    eval "$(jsonfilter -i $pkg_platform_json -e 'bld_date=$.build_at' -e 'bld_num_to=$.version_code')"
+    eval "$(jsonfilter -i $pkg_platform_json -e 'bld_num_to=$.version_code')"
 
     # Use the platform data for most target image data.
     local img_prefix img_file
     if $use_asu; then
         eval "$(jsonfilter -i $pkg_platform_json \
+            -e 'bld_date=$.build_at' \
             -e 'img_prefix=$.image_prefix' \
             -e "img_file=\$.images[@.type='${dev_sutype}' && @.filesystem='${dev_fstype}'].name")"
     else
         eval "$(jsonfilter -i $pkg_platform_json \
+            -e "bld_date=$.source_date_epoch" \
             -e "img_prefix=\$.profiles['${dev_platform}'].image_prefix" \
             -e "img_file=\$.profiles['${dev_platform}'].images[@.type='${dev_sutype}' && @.filesystem='${dev_fstype}'].name")"
+            bld_date=$(date -d @${bld_date} -uIs)
     fi
 
     # Use the platform BOM as it appears to be the only file containing
