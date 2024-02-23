@@ -28,6 +28,7 @@ url_downloads='https://downloads.openwrt.org'         # This should be in config
 url_overview="$url_sysupgrade/json/v1/overview.json"  # Static
 url_config="$url_firmware/config.js"                  # Our source for available versions.
 url_failure=''                                        # Composed in dl_failures
+url_imgbuilder=''                                     # Image builder tar for the target version.
 
 # Files used.
 tmp_loc='/tmp/pkg-'
@@ -146,6 +147,10 @@ collect_config() {
 #       dev_fstype='squashfs'
 #       dev_sutype='sysupgrade'
 #   fi
+
+    local v=''
+    [ "$bld_ver_to" != 'SNAPSHOT' ] && v="${bld_ver_to}-"
+    url_imgbuilder="$url_downloads/$rel_dir/targets/$dev_target/openwrt-imagebuilder-${v}${dev_target/\//-}.Linux-x86_64.tar.xz"
 }
 
 #-------------------------------------------------------------------------------
@@ -288,19 +293,34 @@ get_dependencies() {
 
     awk -F': ' '
         /^Package:/ {
-            if (package != "") {
-                # A package without dependencies.
-                printf "%s:\n", package;
+            if (package) {
+                printf "%s:%s\n", package, deps;
             }
             package = $2;
+            deps    = "";
+        }
+        /^Status:.*not-installed/ {
+            package = "";
+            deps    = "";
+        }
+        /^ABIVersion:/ {
+            # Remove ABI version, see
+            #    https://github.com/openwrt/rpcd/blob/master/sys.c#L231
+            l1 = length(package);
+            l2 = length($2);
+            package = substr(package, 1, l1-l2);
         }
         /^Depends:/ {
-            dout = $2;
-            gsub(/ \([^\)]*\)/, "", dout);  # Remove version spec.
-            gsub(/, /, ":", dout);          # Convert separators.
+            deps = $2;
+            gsub(/ \([^\)]*\)/, "", deps);  # Remove version spec.
+            gsub(/, /, ":", deps);          # Convert separators.
+            deps = deps ":";
+        }
 
-            printf "%s:%s:\n", package, dout;
-            package = "";
+        END {
+            if (package) {
+                printf "%s:%s\n", package, deps;
+            }
         }
     ' /usr/lib/opkg/status | sort > $pkg_depends
 }
@@ -381,6 +401,7 @@ show_config() {
         Root-FS-type  $dev_fstype
         Sys-type      $dev_sutype
         Image-file    $img_file
+        Image-builder $url_imgbuilder
         Build-at      $bld_date
 
 INFO
