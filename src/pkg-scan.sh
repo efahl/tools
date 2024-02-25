@@ -28,6 +28,7 @@ url_downloads='https://downloads.openwrt.org'         # This should be in config
 url_overview="$url_sysupgrade/json/v1/overview.json"  # Static
 url_config="$url_firmware/config.js"                  # Our source for available versions.
 url_failure=''                                        # Composed in dl_failures
+url_img=''                                            # URL where img and imgbuilder reside.
 url_imgbuilder=''                                     # Image builder tar for the target version.
 
 # Files used.
@@ -88,6 +89,13 @@ log() {
 
 #-------------------------------------------------------------------------------
 #-- Globals state values -------------------------------------------------------
+# dev_target is concatenation of actual target and subtarget using '/'
+# dev_platform is manufacturer and device, separated by ',' xformed to '_'
+#   target = x86    or mediatek  or ath79
+#   subtgt = 64     or mt7622    or generic
+#   mfgr   = <none> or linksys   or tplink
+#   device = <none> or e8450-ubi or archer-c7-v4
+# See supported_devices in sysupgrade target-specific json
 
 dev_arch=''       # "x86_64" or "mipsel_24kc"   or "aarch64_cortex-a53", contained in pkg_platform_json
 dev_target=''     # "x86/64" or "ath79/generic" or "mediatek/mt7622", from board file
@@ -121,6 +129,7 @@ collect_config() {
 
     #https://github.com/openwrt/packages/blob/master/utils/auc/src/auc.c#L756
     if [ "$dev_target" = 'x86/64' ] || [ "$dev_target" = 'x86/generic' ]; then
+        # Bug: misses geode and legacy...
         dev_platform='generic'
         dev_sutype='combined'
     else
@@ -150,7 +159,8 @@ collect_config() {
 
     local v=''
     [ "$bld_ver_to" != 'SNAPSHOT' ] && v="${bld_ver_to}-"
-    url_imgbuilder="$url_downloads/$rel_dir/targets/$dev_target/openwrt-imagebuilder-${v}${dev_target/\//-}.Linux-x86_64.tar.xz"
+    url_img="$url_downloads/$rel_dir/targets/$dev_target/"
+    url_imgbuilder="openwrt-imagebuilder-${v}${dev_target/\//-}.Linux-x86_64.tar.xz"
 }
 
 #-------------------------------------------------------------------------------
@@ -397,12 +407,13 @@ show_config() {
         Package-arch  $dev_arch
         Version-from  $bld_ver_from $bld_num_from (kernel $bld_kver_from)
         Version-to    $bld_ver_to $bld_num_to (kernel $bld_kver_to)
+        Build-at      $bld_date
         Image-prefix  $img_prefix
         Root-FS-type  $dev_fstype
         Sys-type      $dev_sutype
+        Image-url     $url_img
         Image-file    $img_file
         Image-builder $url_imgbuilder
-        Build-at      $bld_date
 
 INFO
 }
