@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # vim: set expandtab softtabstop=4 shiftwidth=4:
-# Copyright (C) 2022 Eric Fahlgren
+# Copyright (C) 2022-2024 Eric Fahlgren
 
 
 import subprocess as _SP
@@ -31,22 +31,20 @@ def get_status_output(cmd, *args, limit=None, **kwds):
     kwds.setdefault('stdout',   _SP.PIPE)
     kwds.setdefault('stderr',   _SP.STDOUT)   # We re-route stderr -> stdout for simplicity.
 
-    process = _SP.Popen(cmd, *args, **kwds)
+    with _SP.Popen(cmd, *args, **kwds) as process:
+        try:
+            stdout_txt, stderr_text = process.communicate(timeout=limit)
+        except _SP.TimeoutExpired as exc:
+            stdout_txt = str(exc)
 
-    try:
-        stdout_txt, stderr_text = process.communicate(timeout=limit)
-    except _SP.TimeoutExpired as exc:
-        stdout_txt = str(exc)
+        if process.stdout and not process.stdout.closed:
+            # Make sure to grab the tail end of the buffer after the
+            # process has terminated.
+            stdout_txt += process.stdout.read()
+            process.stdout.close()
 
-    if process.stdout and not process.stdout.closed:
-        # Make sure to grab the tail end of the buffer after the
-        # process has terminated.
-        stdout_txt += process.stdout.read()
-        process.stdout.close()
-
-    stdout_txt = stdout_txt.replace('\r', '').rstrip()
-    status = process.wait()
-    if process.stdin:
-        process.stdin.close()
+        stdout_txt = stdout_txt.replace('\r', '').rstrip()
+        status = process.wait()
+        if process.stdin:
+            process.stdin.close()
     return status, stdout_txt
-
