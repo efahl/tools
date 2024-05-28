@@ -342,6 +342,7 @@ if __name__ == '__main__':
             '''.replace('                ', ''),
         )
         parser.add_argument('-v', '--verbose', default=False,  action='store_true',         help='Print a bunch of extra debugging data.')
+        parser.add_argument('-s', '--short',   default=False,  action='store_true',         help='Reduce output to interesting stuff.')
         parser.add_argument('-r', '--refresh', default=False,  action='store_true',         help='Reload the cache using a fresh lookup.')
         parser.add_argument('-d', '--dump',    default=False,  action='store_true',         help='Dump the cache and quit.')
         parser.add_argument('-t', '--test',    default=False,  action='store_true',         help='Set an option state.')
@@ -373,13 +374,13 @@ if __name__ == '__main__':
         if not whois:
             print(f'        Error: {whois.error}')
         else:
-            print('        Query:  ', whois.url)
+            if not args.short: print('        Query:  ', whois.url)
             print('        Owner:  ', whois.owner)
-            print('        Handle: ', whois.handle)
-            print('        CIDR:   ', whois.cidr)
+            if not args.short: print('        Handle: ', whois.handle)
+            if not args.short: print('        CIDR:   ', whois.cidr)
             print('        Name:   ', whois.name)
             print('        Country:', whois.country)
             print('        ASN:    ', whois.asn)
-            print('        Parent: ', whois.parent)
+            if not args.short: print('        Parent: ', whois.parent)
 
 #-------------------------------------------------------------------------------
