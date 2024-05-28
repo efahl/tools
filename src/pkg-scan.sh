@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) 2023-2024 Eric Fahlgren <eric.fahlgren@gmail.com>
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-2.0-only
 # vim: set expandtab softtabstop=4 shiftwidth=4:
 # shellcheck disable=SC2039,SC2155  # "local" not defined in POSIX sh
 #-------------------------------------------------------------------------------
@@ -201,14 +201,30 @@ dl_packages() {
     #     https://sysupgrade.openwrt.org/json/v1/snapshots/packages/x86_64-index.json    
     #     Contains "vim" and "auc" and "dnsmasq-full"...
     #
+    #     Consolidated from all of
+    #     https://downloads.openwrt.org/snapshots/packages/x86_64/base/index.json
+    #     https://downloads.openwrt.org/snapshots/packages/x86_64/luci/index.json
+    #     https://downloads.openwrt.org/snapshots/packages/x86_64/packages/index.json
+    #     https://downloads.openwrt.org/snapshots/packages/x86_64/routing/index.json
+    #     https://downloads.openwrt.org/snapshots/packages/x86_64/telephony/index.json
+    #
     #  2) Platform packages, built specifically for this platform:
     #     https://sysupgrade.openwrt.org/json/v1/snapshots/targets/x86/64/index.json
     #     Contains things like "grub2" on x86_64 and "kmod-*" for everything.
+    #     Just a copy of
+    #     https://downloads.openwrt.org/snapshots/targets/x86/64/packages/index.json
+    #
+    # The downloads versions have another layer of json, much like the profiles json.
+    # Major issue uncovered...  The downloads have an index for each separate feed,
+    # while the sysupgrade versions have all the feeds consolidated into the
+    # single arch file.
 
     local url_pkg_arch="$url_sysupgrade/json/v1/$rel_dir/packages/${dev_arch}-index.json"
+#   local url_pkg_arch="$url_downloads/$rel_dir/packages/$dev_arch/packages/index.json"
     download "$url_pkg_arch" "$pkg_pkg_arch_json"
 
     local url_pkg_plat="$url_sysupgrade/json/v1/$rel_dir/targets/$dev_target/index.json"
+#   local url_pkg_plat="$url_downloads/$rel_dir/targets/$dev_target/packages/index.json"
     download "$url_pkg_plat" "$pkg_pkg_platform_json"
 }
 
@@ -254,13 +270,14 @@ dl_failures() {
     #     https://downloads.openwrt.org/releases/faillogs-23.05/mipsel_24kc/packages/
     #
     # Sets global 'url_failure'
+    local fail_dir="${1:-}"
 
     if [ "$bld_ver_to" = 'SNAPSHOT' ]; then
         location='snapshots/faillogs'
     else
         location="releases/faillogs-${rel_branch}"
     fi
-    url_failure="$url_downloads/$location/$dev_arch/packages/"
+    url_failure="$url_downloads/$location/$dev_arch/$fail_dir"
 
     local msg="No package build failures found for $bld_ver_to $dev_arch"
     download "$url_failure" "$pkg_fail_html" "$msg"
@@ -291,6 +308,22 @@ get_defaults() {
     } | sort -u > $pkg_defaults
 }
 
+canonical_name() {
+    # Scan the ABI versions table and return the base name of the package.
+    local pkg="$1"
+    awk -v pkg="$pkg" -F':' '
+        {
+            if ($1 == pkg) {
+                pkg=$2
+                exit
+            }
+        }
+        END {
+            print pkg
+        }
+    ' /tmp/pkg-abiversions.txt
+}
+
 get_dependencies() {
     # Using data from opkg status, build a file containing all installed
     # package dependencies.  Each line appears thus:
@@ -300,6 +333,8 @@ get_dependencies() {
     # such that 
     #     pkg = an installed package, with no prefixing delimiter
     #     dep = all dependencies are both prefixed and suffixed with ':'
+
+    : >| /tmp/pkg-abiversions.txt
 
     awk -F': ' '
         /^Package:/ {
@@ -318,7 +353,9 @@ get_dependencies() {
             #    https://github.com/openwrt/rpcd/blob/master/sys.c#L231
             l1 = length(package);
             l2 = length($2);
+            printf "%s:", package >> "/tmp/pkg-abiversions.txt";
             package = substr(package, 1, l1-l2);
+            printf "%s\n", package >> "/tmp/pkg-abiversions.txt";
         }
         /^Depends:/ {
             deps = $2;
@@ -425,16 +462,19 @@ show_versions() {
     # Note that the firmware selector has a much more liberal notion of
     # available versions:
     #   conf_url='https://firmware-selector.openwrt.org/config.js'
-    #   ucode -p "$(curl -s $conf_url | sed 's/^var //'); sort(keys(config.versions))"
+    #   ucode -p "$(wget -s -O - $conf_url | sed 's/^var //'); sort(keys(config.versions))"
     # or
-    #   eval $(ucode -p "$(curl -s $conf_url | sed 's/^var //')" | jsonfilter -e 'versions=$.versions')
+    #   eval $(ucode -p "$(wget -s -O - $conf_url | sed 's/^var //')" | jsonfilter -e 'versions=$.versions')
 
+    local src
     if ! $use_asu; then
+        src="$url_config"
         dl_config
         eval "$(ucode -p "$(sed 's/^var //' $pkg_config_js)" | jsonfilter -e 'versions=$.versions')"
     else
         # Old way, but sysupgrade list is very short and has none of the older
         # builds which might still be of interest.
+        src="$url_overview"
         dl_overview
 
         # shellcheck disable=SC2034  # 'latest' and 'branches' are unused, but may be someday.
@@ -445,16 +485,19 @@ show_versions() {
                 -e 'versions=$.branches[*].versions.*')"
     fi
 
-    printf '\nValid version-to values from %s:\n' "$url_overview"
+    printf '\nValid version-to values from %s:\n' "$src"
     {
+        local suffix
         local found=false
         for rel in $versions; do
+            suffix=''
             if [ "$bld_ver_to" = "$rel" ]; then
-                printf '- %s     <<-- your version-to is correct\n' "$rel"
+                suffix='  <<-- your version-to is correct'
                 found=true
-            else
-                printf '- %s\n' "$rel"
+            elif [ "$bld_ver_from" = "$rel" ]; then
+                suffix='  <<-- installed version'
             fi
+            printf '- %s%s\n' "$rel" "$suffix"
         done
         if $found; then
             printf 'Either the ASU server is having issues, or your specified version is no longer supported.'
@@ -631,28 +674,36 @@ check_failures() {
     # Crude attempt at finding any build issues with the packages.  Scrapes
     # the html from the downloads status page.
 
+    # Testing!  Pick a package that's currently not building
+    #p=elektra ; echo $p >> $pkg_installed ; echo $p >> $pkg_user
+
     if dl_failures; then
         printf 'There are currently package build failures for %s %s:\n' "$bld_ver_to" "$dev_arch"
 
-        # Testing!  Pick a package that's currently not building
-        #p=cloudflared ; echo $p >> $pkg_installed ; echo $p >> $pkg_user
+        local bad_feeds=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < $pkg_fail_html)
+        for feed in $bad_feeds; do
+            if dl_failures "$feed"; then
+                printf '  Feed: %s\n' "$feed"
 
-        # Scraping the html is a total hack.
-        # Let me know if you have an API on downloads that can give this info.
-        local bad_ones=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < $pkg_fail_html)
+                # Scraping the html is a total hack.
+                # Let me know if you have an API on downloads that can give this info.
+                local bad_ones=$(awk -F'<|>' '/td class="n"/ {printf "%s ", $7}' < $pkg_fail_html)
 
-        # shellcheck disable=SC2086  # Because we want to expand bad_ones.
-        local widest=$(printf "%s\n" $bad_ones | wc -L)
-        local found=false
-        for bad in $bad_ones; do
-            if grep -q "\b$bad\b" $pkg_installed; then
-                msg=$(colorize 'ERROR: You have this installed, DO NOT UPGRADE!')
-                found=true
-            else
-                msg='Package not installed locally, you should be ok'
+                # shellcheck disable=SC2086  # Because we want to expand bad_ones.
+                local widest=$(printf '%s\n' $bad_ones | wc -L)
+                local found=false
+                for bad in $bad_ones; do
+                    if grep -q "\b$bad\b" $pkg_installed; then
+                        msg=$(colorize 'ERROR: You have this installed, DO NOT UPGRADE!')
+                        found=true
+                    else
+                        msg='Package not installed locally, you should be ok'
+                    fi
+                    printf '    %-*s - %s\n' "$widest" "$bad" "$msg"
+                done
             fi
-            printf '  %-*s - %s\n' "$widest" "$bad" "$msg"
         done
+
         $found && printf "%s" "$(colorize 'NOTE THE ERRORS ABOVE: ')"
         printf 'Details at %s\n\n' "$url_failure"
     fi
