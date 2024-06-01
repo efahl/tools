@@ -277,10 +277,10 @@ dl_failures() {
     else
         location="releases/faillogs-${rel_branch}"
     fi
-    url_failure="$url_downloads/$location/$dev_arch/$fail_dir"
+    url_failure="$url_downloads/$location/$dev_arch"
 
     local msg="No package build failures found for $bld_ver_to $dev_arch"
-    download "$url_failure" "$pkg_fail_html" "$msg"
+    download "$url_failure/$fail_dir" "$pkg_fail_html" "$msg"
 }
 
 #-------------------------------------------------------------------------------
