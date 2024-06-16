@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: GPL-2.0
 #-------------------------------------------------------------------------------
 """
-Python implementation of the well-known 'whois' function, using availabel RIR
+Python implementation of the well-known 'whois' function, using available RIR
 RDAP databases.
 """
 #-------------------------------------------------------------------------------
@@ -167,9 +167,12 @@ class WhoIs:
             return 'no-organization'
 
         found = False
+        handle       = 'no-handle'
         organization = 'no-organization'
         for entity in entities:
+            if 'handle' not in entity: continue
             handle = entity['handle']
+            if 'vcardArray' not in entity: continue
             for item in entity['vcardArray'][1]:
                 if item[0] == 'fn':
                     organization = item[3]
