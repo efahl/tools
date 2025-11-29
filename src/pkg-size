@@ -1,0 +1,325 @@
+#!/usr/bin/ucode -S
+// pkg-size - Recursively sum package file sizes.
+// Copyright (c) 2024-2025 Eric Fahlgren <eric.fahlgren@gmail.com>
+// SPDX-License-Identifier: GPL-2.0-only
+// vim: set noexpandtab softtabstop=8 shiftwidth=8 syntax=javascript:
+//------------------------------------------------------------------------------
+
+import * as fs from "fs";
+import * as ap from "utils.argparse";
+
+//------------------------------------------------------------------------------
+
+let arg_defs = proto([
+	ap.DEFAULT_HELP,
+	{ name: "packages", short: "-p", long: "--packages", action: "store", nargs: 1,       help: "Comma-separated list of packages to analyze." },
+	{ name: "ignore",   short: "-i", long: "--ignore",   action: "store", nargs: 1,       help: "Comma-separated list of packages or specific files to ignore." },
+	{ name: "all",      short: "-a", long: "--all",      action: "set",   default: false, help: "Show all sub-packages and files, not just unique ones." },
+	{ name: "verbose",  short: "-v", long: "--verbose",  action: "set",   default: false, help: "Spew more stuff." },
+	{ name: "dump",     short: "-d", long: "--dump",     action: "set",   default: false, help: "Dump the database." },
+], ap.ArgParser);
+
+arg_defs.set_prog_info("pkg-size 0.0");
+arg_defs.set_bookends("\nSum the file sizes for packages, recursing through dependencies.\n");
+let options = arg_defs.parse();
+
+//------------------------------------------------------------------------------
+
+function commatize(n)
+{
+	let s = sprintf("%9d", n);
+	for (let i = 3; i < length(s); i += 4) {
+		s = substr(s, 0, i) + "," + substr(s, i);
+	}
+	return replace(s, " ,", "  ");
+}
+
+function color(color_name)
+{
+	return color_name ? `\033[38;2;${color_name}m` : "\033[m";
+}
+
+function hi(str)
+{
+	if (! fs.stdout.isatty()) return str;
+	return color("0;255;255") + str + color();
+}
+
+//------------------------------------------------------------------------------
+// The 'files' member has lazy population and should not be used directly,
+// call 'get_files' when you need it.
+//
+// packages = {
+//   pkg: {
+//     provides:  [list of names we provide],
+//     depends:   [list of packages we depend upon],
+//     referents: [list of packages that depend on us],
+//     files:     [list of files comprising this package],
+//
+//     # 'abiversion' is only populated and utilized with apk due to its
+//     # inconsistent naming of packages and list files
+//     abiversion: "string",
+//   },
+// }
+
+let use_opkg = fs.access("/usr/lib/opkg/status");
+
+let packages = {};
+
+function abi_clean(pkg_name)
+{
+	// ABI-version remover for apk package names.
+	let name = pkg_name;
+	if (pkg_name in packages) {
+		let abiv = packages[pkg_name].abiversion;
+		if (abiv) {
+			name = substr(name, 0, -length(abiv));
+		}
+	}
+	return name;
+}
+
+function real_name(pkg)
+{
+	// Turn generic names into real names.  For example, if a package
+	// depends on plain 'dnsmasq', we might turn it into the installed
+	// 'dnsmasq-full'.
+	if (! (pkg in packages)) {
+		for (let name, data in packages) {
+			if (pkg in data.provides) {
+				return name;
+			}
+		}
+	}
+	return pkg;
+}
+
+function opkg_collect_packages()
+{
+	let line;
+	let pkg  = null;
+	let save = false;
+	let data = { referents:[] };
+	let list = null;
+	let m    = null;
+
+	let opkg_status = fs.open("/usr/lib/opkg/status", "r");
+	while (line = opkg_status.read("line")) {
+		line = trim(line);
+
+		if (m = match(line, /^Package: (.*)$/)) {
+			if (save && pkg && data) {
+				packages[pkg] = data;
+			}
+			pkg  = m[1];
+			save = true;
+			data = { referents:[] };
+		}
+		else if (match(line, /^Status:.*not-installed/)) {
+			save = false;
+		}
+		else if (m = match(line, /^Depends: (.*)/)) {
+			list = replace(m[1], /,|\([^\)]*\)/g, ""); // Remove version specs and commas.
+			data.depends = sort(split(trim(list), / +/));
+		}
+		else if (m = match(line, /^Provides: (.*)/)) {
+			list = replace(m[1], /,|\([^\)]*\)/g, "");
+			data.provides = split(trim(list), / +/);
+		}
+	}
+	opkg_status.close();
+
+	if (save && pkg && data) {
+		packages[pkg] = data;
+	}
+}
+
+function apk_clean_list(string)
+{
+	// Return a list of constraint-free package names:
+	//   "iptables iptables-legacy" => ["iptables", "iptables-legacy"]
+	//   "libatomic=14.3.0-r4"      => ["libatomic"]
+	let splitter = regexp("([^@~<>=]*)(.*)"); // separators from man 5 apk-world
+	let pkg_list = [];
+	for (let name in split(string, " ")) {
+		let parts = match(name, splitter);
+		push(pkg_list, parts[1]);
+	}
+	return pkg_list;
+}
+
+function apk_collect_packages()
+{
+	// apk query --format json --fields name,provides,depends,tags uclient-fetch
+	let line;
+	let pkg  = null;
+	let data = { referents:[] };
+
+	let installed = fs.open("/lib/apk/db/installed", "r");
+	while (line = installed.read("line")) {
+		line = trim(line);
+		if (! line) {
+			packages[pkg] = data;
+			pkg           = null;
+			data          = { referents:[] };
+			continue;
+		}
+
+		let prefix = substr(line, 0, 2);
+		let tail   = substr(line, 2);
+		switch (prefix) {
+			case "P:":
+				pkg = tail;
+				break;
+			case "p:":
+				data.provides = apk_clean_list(tail);
+				break;
+			case "D:":
+				data.depends = apk_clean_list(tail);
+				break;
+			case "g:":
+				for (let tag in split(tail, " ")) {
+					tag = match(tag, /^openwrt:abiversion=(.*)/);
+					if (tag) {
+						data.abiversion = tag[1];
+						break;
+					}
+				}
+				break;
+		}
+	}
+	installed.close();
+}
+
+function collect_packages()
+{
+	if (use_opkg)
+		opkg_collect_packages();
+	else
+		apk_collect_packages();
+	for (let pkg, data in packages) {
+		data.depends = map(data.depends, real_name);
+		for (let dep in data.depends) {
+			push(packages[dep].referents, pkg);
+		}
+	}
+	packages = sort(packages);
+}
+
+function generic_get_files(pkg, file)
+{
+	if (! exists(packages[pkg], "files")) {
+		let files = fs.readfile(file);
+		if (files) {
+			files = split(trim(files), "\n");
+			files = uniq(sort(map(files, (p) => fs.realpath(p) ?? p)));
+			packages[pkg].files = files;
+		}
+	}
+	return packages[pkg].files;
+}
+
+function opkg_get_files(pkg)
+{
+	let file = `/usr/lib/opkg/info/${pkg}.list`;
+	return generic_get_files(pkg, file);
+}
+
+function apk_get_files(pkg)
+{
+	let file = `/lib/apk/packages/${abi_clean(pkg)}.list`;
+	return generic_get_files(pkg, file);
+}
+
+function get_files(pkg)
+{
+	return use_opkg ? opkg_get_files(pkg) : apk_get_files(pkg);
+}
+
+//------------------------------------------------------------------------------
+
+let reported = [];
+function get_sizes(pkg, from)
+{
+	let sum = 0;
+	let files = get_files(pkg);
+	let n_refs = length(packages[pkg].referents) - 1;
+	if (files) {
+		printf("'%s' files", hi(pkg));
+		if (from) {
+			printf(" via '%s'", hi(from));
+			if (options.all) {
+				if (n_refs == 0) 
+					printf(" (unshared)");
+				else if (options.verbose)
+					printf(" (shared with %s)", packages[pkg].referents);
+				else
+					printf(" (shared with %d other packages)", n_refs);
+			}
+		}
+		printf(":\n");
+
+		for (let file in files) {
+			if (file in reported) continue;
+			push(reported, file);
+			let stat = fs.stat(file);
+			if (! stat) {
+				// Could be a delete file, say in uci-defaults,
+				// so check if there's a /rom version of it.
+				stat = fs.stat(`/rom${file}`);
+			}
+			let size = stat ? stat.size : 0;
+			sum += size;
+			printf("%s %s\n", commatize(size), file);
+		}
+	}
+	printf("-----------\n%s bytes %d files in package '%s' \n\n", commatize(sum), length(files), hi(pkg));
+	return sum;
+}
+
+function _analyze(pkg, from)
+{
+	let sum = 0;
+	if (! (pkg in reported)) {
+		push(reported, pkg);
+
+		sum += get_sizes(pkg, from);
+		for (let dep in packages[pkg].depends) {
+			if (! (pkg in packages[dep].referents)) {
+				die(`ERROR: database error for '${pkg}'\n`);
+			}
+			if (! options.all && length(packages[dep].referents) != 1) continue;
+			sum += _analyze(dep, pkg);
+		}
+	}
+	return sum;
+}
+
+function analyze(pkg)
+{
+	reported = split(options.ignore, ",") ?? [];
+	return _analyze(pkg);
+}
+
+//------------------------------------------------------------------------------
+
+collect_packages();
+
+if (options.dump) {
+	printf("%.2J\n", packages);
+	exit(0);
+}
+
+let which = options.all ? "all dependent" : "its unique";
+
+for (let pkg in split(options.packages, ",")) {
+	pkg = real_name(pkg); // So user can say 'tc' for 'tc-tiny', etc.
+	if (! (pkg in packages)) {
+		printf("ERROR: '%s' is not an installed package\n", pkg);
+		break;
+	}
+	let total_bytes = analyze(pkg);
+	printf("===========\n%s bytes used by '%s' and %s packages\n\n", commatize(total_bytes), hi(pkg), which);
+}
+
+exit(0);
