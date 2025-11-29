@@ -28,6 +28,16 @@
 import * as fs from "fs";
 
 
+let verbose = "--verbose" in ARGV;  // Super crappy.
+
+function log(fmt, ...args)
+{
+	if (verbose) {
+		warn(sprintf(fmt, ...args));
+	}
+}
+
+
 let packages = {
 //	pkg: {
 //		version: str,     // Unused, possibly useful for diagnostics.
@@ -50,6 +60,25 @@ function abi_clean(pkg_name)
 	return name;
 }
 
+function abi_versioned(pkg_name)
+{
+	// Do the much more intensive conversion from non-versioned to
+	// versioned.
+
+	if (pkg_name in packages) {
+		// Shortcut: Assume it's already in versioned form.
+		return pkg_name;
+	}
+
+	for (let pkg, info in packages) {
+		if (pkg_name == abi_clean(pkg)) {
+			return pkg;
+		}
+	}
+
+	return pkg_name;
+}
+
 function is_top_level(pkg_name)
 {
 	let name = abi_clean(pkg_name);
@@ -69,6 +98,7 @@ let pkg = null;
 let version = null;
 let depends = null;
 let abiversion = null;
+let constraint = "";
 
 // https://wiki.alpinelinux.org/wiki/Apk_spec
 let db = fs.open("/lib/apk/db/installed", "r");
@@ -76,7 +106,7 @@ while (line = db.read("line")) {
 	line = trim(line);
 	if (! line) {
 		//printf("add %s %s %s\n", pkg, version);
-		packages[pkg] = { version, depends, abiversion };
+		packages[pkg] = { version, depends, abiversion, constraint };
 		pkg = version = depends = abiversion = null;
 	}
 	else {
@@ -108,6 +138,8 @@ db.close();
 if (pkg != null) warn(`ERROR: db/installed corrupted at ${pkg}\n`);
 
 //-- Collect any pinned version constraints -----------------------------------
+//   We expect world file to have same ABI-versioned name as in 'packages',
+//   so coerce ones that are ABI-clean to their versioned form.
 
 let splitter = regexp("([^@~<>=]*)(.*)"); // separators from man 5 apk-world
 
@@ -116,11 +148,19 @@ while (line = world_file.read("line")) {
 	line = trim(line);
 	let parts = match(line, splitter);
 	pkg = parts[1];
-	let constraint = parts[2];
+	constraint = parts[2];
+
+	let versioned = abi_versioned(pkg);
+	if (pkg != versioned) {
+		log("INFO: '%s' is not ABI-versioned, renamed '%s'...\n", pkg, versioned);
+		pkg = versioned;
+	}
+
 	if (! (pkg in packages)) {
 		warn(`WARNING: ${pkg} in world, but not in db/installed\n`);
 		continue;
 	}
+
 	packages[pkg].constraint = constraint;
 }
 world_file.close();
