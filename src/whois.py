@@ -9,7 +9,7 @@ RDAP databases.
 """
 #-------------------------------------------------------------------------------
 
-from requests import get
+from requests import get as rq_get
 
 args = None
 
@@ -87,6 +87,7 @@ country_codes = [
     {"Name":"Equatorial Guinea","Code":"GQ"},
     {"Name":"Eritrea","Code":"ER"},
     {"Name":"Estonia","Code":"EE"},
+    {"Name":"Eswatini","Code":"SZ"},
     {"Name":"Ethiopia","Code":"ET"},
     {"Name":"Falkland Islands (Malvinas)","Code":"FK"},
     {"Name":"Faroe Islands","Code":"FO"},
@@ -230,11 +231,10 @@ country_codes = [
     {"Name":"Sudan","Code":"SD"},
     {"Name":"Suriname","Code":"SR"},
     {"Name":"Svalbard and Jan Mayen","Code":"SJ"},
-    {"Name":"Swaziland","Code":"SZ"},
     {"Name":"Sweden","Code":"SE"},
     {"Name":"Switzerland","Code":"CH"},
     {"Name":"Syrian Arab Republic","Code":"SY"},
-    {"Name":"Taiwan, Province of China","Code":"TW"},
+    {"Name":"Taiwan","Code":"TW"},
     {"Name":"Tajikistan","Code":"TJ"},
     {"Name":"Tanzania, United Republic of","Code":"TZ"},
     {"Name":"Thailand","Code":"TH"},
@@ -278,7 +278,7 @@ for country in country_codes:
     country_map[code] = name
 
 def country_decode(code):
-    return country_map.get(code, "?")
+    return country_map.get(code.upper(), "?")
 
 #-------------------------------------------------------------------------------
 
@@ -381,7 +381,7 @@ class WhoIs:
         """ From a given direct reference url, grab the json and go. """
         self.url   = url
         self.error = None
-        with get(self.url) as response:
+        with rq_get(self.url) as response:
             if response.status_code == 200:
                 self.extract(response.json())
             else:
@@ -396,6 +396,19 @@ class WhoIs:
         self.country  = self._js.get('country', 'no-country')
         self.asn      = self._asn()
         self.parent   = self._parent()
+
+        if self.owner:
+            # Fix sloppy owner naming.
+            bits = self.owner.split(' - ')
+            if len(bits) > 1 and bits[0] != bits[1] and bits[1].isupper():
+                if len(bits) == 2:
+                    self.owner = bits[0] + ' - ' + bits[1].title()
+                elif len(bits) == 3:
+                    self.owner = bits[0] + ' - ' + bits[1].title() + ' - ' + bits[2]
+
+        if len(self.country) == 2:
+            # Fix sloppy country code specs.
+            self.country = self.country.upper()
 
     def __bool__(self):
         return self._js is not None
@@ -420,7 +433,7 @@ class WhoIs:
         """
 
         url = f'https://whois.arin.net/rest/net/{handle}.json'
-        with get(url) as response:
+        with rq_get(url) as response:
             if response.status_code == 200:
                 return response.json()
 
