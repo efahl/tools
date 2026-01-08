@@ -120,7 +120,7 @@ while (line = db.read("line")) {
 				version = tail;
 				break;
 			case "D:":
-				depends = split(tail, " ");
+				depends = map(split(tail, " "), (s) => split(s, /[<=>]+/)[0]);
 				break;
 			case "g:":
 				for (let tag in split(tail, " ")) {
