@@ -13,9 +13,10 @@ import * as ap from "utils.argparse";
 let arg_defs = proto([
 	ap.DEFAULT_HELP,
 	{ name: "packages", short: "-p", long: "--packages", action: "store", nargs: 1,       help: "Comma-separated list of packages to analyze." },
-	{ name: "ignore",   short: "-i", long: "--ignore",   action: "store", nargs: 1,       help: "Comma-separated list of packages or specific files to ignore." },
+	{ name: "ignore",   short: "-i", long: "--ignore",   action: "store", nargs: 1,       help: "Comma-separated regex list of packages or specific files to ignore." },
 	{ name: "all",      short: "-a", long: "--all",      action: "set",   default: false, help: "Show all sub-packages and files, not just unique ones." },
 	{ name: "verbose",  short: "-v", long: "--verbose",  action: "set",   default: false, help: "Spew more stuff." },
+	{ name: "tree",     short: "-t", long: "--tree",     action: "set",   default: false, help: "Show the dependency tree for packages." },
 	{ name: "dump",     short: "-d", long: "--dump",     action: "set",   default: false, help: "Dump the database." },
 ], ap.ArgParser);
 
@@ -264,7 +265,7 @@ function get_sizes(pkg, from)
 			push(reported, file);
 			let stat = fs.stat(file);
 			if (! stat) {
-				// Could be a delete file, say in uci-defaults,
+				// Could be a deleted file, say in uci-defaults,
 				// so check if there's a /rom version of it.
 				stat = fs.stat(`/rom${file}`);
 			}
@@ -297,13 +298,41 @@ function _analyze(pkg, from)
 
 function analyze(pkg)
 {
-	reported = split(options.ignore, ",") ?? [];
-	return _analyze(pkg);
+	return _analyze(pkg, null);
+}
+
+//------------------------------------------------------------------------------
+
+function _tree(pkg, level)
+{
+	if (! (pkg in reported)) {
+		push(reported, pkg);
+		printf(`%${level*2}s- %s\n`, "", pkg);
+		for (let dep in packages[pkg].depends) {
+			_tree(dep, level+1);
+		}
+	}
+}
+
+function tree(pkg)
+{
+	_tree(pkg, 0);
 }
 
 //------------------------------------------------------------------------------
 
 collect_packages();
+
+if (options.ignore) {
+	for (let pattern in split(options.ignore, ",")) {
+		pattern = regexp("^"+pattern+"$");
+		for (let pkg in packages) {
+			if (! (pkg in reported) && match(pkg, pattern)) {
+				push(reported, pkg);
+			}
+		}
+	}
+}
 
 if (options.dump) {
 	printf("%.2J\n", packages);
@@ -313,13 +342,18 @@ if (options.dump) {
 let which = options.all ? "all dependent" : "its unique";
 
 for (let pkg in split(options.packages, ",")) {
-	pkg = real_name(pkg); // So user can say 'tc' for 'tc-tiny', etc.
-	if (! (pkg in packages)) {
-		printf("ERROR: '%s' is not an installed package\n", pkg);
-		break;
+	if (options.tree) {
+		tree(pkg);
 	}
-	let total_bytes = analyze(pkg);
-	printf("===========\n%s bytes used by '%s' and %s packages\n\n", commatize(total_bytes), hi(pkg), which);
+	else {
+		pkg = real_name(pkg); // So user can say 'tc' for 'tc-tiny', etc.
+		if (! (pkg in packages)) {
+			printf("ERROR: '%s' is not an installed package\n", pkg);
+			break;
+		}
+		let total_bytes = analyze(pkg);
+		printf("===========\n%s bytes used by '%s' and %s packages\n\n", commatize(total_bytes), hi(pkg), which);
+	}
 }
 
 exit(0);
