@@ -29,6 +29,7 @@ import * as fs from "fs";
 
 
 let verbose = "--verbose" in ARGV;  // Super crappy.
+let generate = "--generate" in ARGV;
 
 function log(fmt, ...args)
 {
@@ -182,6 +183,8 @@ for (let pkg, info in packages) {
 
 //-- Write result in world format ---------------------------------------------
 
-for (let pkg, info in world) {
-	printf("%s%s\n", pkg, info.constraint);
+if (generate) {
+	for (let pkg, info in world) {
+		printf("%s%s\n", pkg, info.constraint);
+	}
 }
