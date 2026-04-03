@@ -28,8 +28,9 @@
 import * as fs from "fs";
 
 
-let verbose = "--verbose" in ARGV;  // Super crappy.
+let verbose  = "--verbose"  in ARGV;  // Super crappy, use owut's argparser...
 let generate = "--generate" in ARGV;
+let why      = "--why"      in ARGV;
 
 function log(fmt, ...args)
 {
@@ -78,6 +79,20 @@ function abi_versioned(pkg_name)
 	}
 
 	return pkg_name;
+}
+
+function what_depends(pkg_name)
+{
+	let rdeps = [];
+	let name = abi_clean(pkg_name);
+	for (let pkg, info in packages) {
+		for (let dep in info.depends) {
+			if (name == abi_clean(dep)) {
+				if (! (pkg in rdeps)) push(rdeps, pkg);
+			}
+		}
+	}
+	return sort(rdeps);
 }
 
 function is_top_level(pkg_name)
@@ -178,6 +193,9 @@ for (let pkg, info in packages) {
 	}
 	else if (pkg in world_list) {
 		warn(`Remove: ${pkg}\n`);
+		if (why) {
+			warn(sprintf("  Required by: %s\n", join(" ", what_depends(pkg))));
+		}
 	}
 }
 
