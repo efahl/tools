@@ -1,5 +1,5 @@
 #!/usr/bin/ucode -S
-// Copyright (c) 2025 Eric Fahlgren <eric.fahlgren@gmail.com>
+// Copyright (c) 2025-2026 Eric Fahlgren <eric.fahlgren@gmail.com>
 // SPDX-License-Identifier: GPL-2.0-only
 // vim: set noexpandtab softtabstop=8 shiftwidth=8 syntax=javascript:
 //------------------------------------------------------------------------------
@@ -144,6 +144,7 @@ if (pkg != null) warn(`ERROR: db/installed corrupted at ${pkg}\n`);
 let splitter = regexp("([^@~<>=]*)(.*)"); // separators from man 5 apk-world
 
 let world_file = fs.open("/etc/apk/world", "r");
+let world_list = [];
 while (line = world_file.read("line")) {
 	line = trim(line);
 	let parts = match(line, splitter);
@@ -162,6 +163,7 @@ while (line = world_file.read("line")) {
 	}
 
 	packages[pkg].constraint = constraint;
+	push(world_list, pkg);
 }
 world_file.close();
 
@@ -172,6 +174,9 @@ for (let pkg, info in packages) {
 	if (is_top_level(pkg) || info.constraint) {
 		// If a package version has been pinned/constrained, it must be in world.
 		world[pkg] = { version: info.version, constraint: info.constraint };
+	}
+	else if (pkg in world_list) {
+		warn(`Remove: ${pkg}\n`);
 	}
 }
 
