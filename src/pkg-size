@@ -12,6 +12,7 @@ import * as ap from "utils.argparse";
 
 let arg_defs = proto([
 	ap.DEFAULT_HELP,
+	ap.DEFAULT_VERSION,
 	{ name: "packages", short: "-p", long: "--packages", action: "store", nargs: 1,       help: "Comma-separated list of packages to analyze." },
 	{ name: "ignore",   short: "-i", long: "--ignore",   action: "store", nargs: 1,       help: "Comma-separated regex list of packages or specific files to ignore." },
 	{ name: "all",      short: "-a", long: "--all",      action: "set",   default: false, help: "Show all sub-packages and files, not just unique ones." },
@@ -228,7 +229,7 @@ function opkg_get_files(pkg)
 
 function apk_get_files(pkg)
 {
-	let file = `/lib/apk/packages/${abi_clean(pkg)}.list`;
+	let file = `/lib/apk/packages/${pkg}.list`;
 	return generic_get_files(pkg, file);
 }
 
